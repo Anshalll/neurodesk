@@ -18,6 +18,7 @@ import { calculateSkillProgress } from '../utils/helpers';
 
 export default function NoteEditor({
   skills = [],
+  skillsLoading = false,
   onUpdateSkill
 }) {
   const navigate = useNavigate();
@@ -26,23 +27,16 @@ export default function NoteEditor({
   const skill = skills.find((s) => s.id === skillId) || skills[0] || null;
 
   useEffect(() => {
-    if (!skill && skills.length > 0) {
+    if (!skillsLoading && !skill) {
       navigate('/');
     }
-  }, [skill, skills, navigate]);
+  }, [skill, skillsLoading, navigate]);
 
   const [activeSubtopicId, setActiveSubtopicId] = useState(
     skill?.subtopics && skill.subtopics.length > 0 ? skill.subtopics[0].id : null
   );
 
-  // Sync activeSubtopicId when skill changes
-  useEffect(() => {
-    if (skill?.subtopics && skill.subtopics.length > 0) {
-      if (!skill.subtopics.some((s) => s.id === activeSubtopicId)) {
-        setActiveSubtopicId(skill.subtopics[0].id);
-      }
-    }
-  }, [skill, activeSubtopicId]);
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [subtopicSearch, setSubtopicSearch] = useState('');
   const [copyFeedback, setCopyFeedback] = useState(false);
@@ -50,12 +44,58 @@ export default function NoteEditor({
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
   const [fontFamily, setFontFamily] = useState('mono'); // 'mono' or 'sans'
   const [fontSize, setFontSize] = useState('14px');
-
+  const [isOpenContext, setisOpenContext] = useState(false)
   const textareaRef = useRef(null);
+  const sidebarResizeRef = useRef(null);
+  const getMaxSidebarWidth = () => Math.max(180, Math.min(480, window.innerWidth * 0.6));
+  const [sidebarWidth, setSidebarWidth] = useState(() => Math.min(240, getMaxSidebarWidth()));
+
+  const handleSidebarResizeStart = (e) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    sidebarResizeRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startWidth: sidebarWidth
+    };
+  };
+
+  const handleSidebarResize = (e) => {
+    const resize = sidebarResizeRef.current;
+    if (!resize || resize.pointerId !== e.pointerId) return;
+
+    setSidebarWidth(Math.min(
+      getMaxSidebarWidth(),
+      Math.max(180, resize.startWidth + e.clientX - resize.startX)
+    ));
+  };
+
+  const handleSidebarResizeEnd = (e) => {
+    if (sidebarResizeRef.current?.pointerId === e.pointerId) {
+      sidebarResizeRef.current = null;
+    }
+  };
+
+  const handleSidebarResizeKeyDown = (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const direction = e.key === 'ArrowRight' ? 1 : -1;
+      setSidebarWidth((width) => Math.min(
+        getMaxSidebarWidth(),
+        Math.max(180, width + direction * 16)
+      ));
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      setSidebarWidth(180);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      setSidebarWidth(getMaxSidebarWidth());
+    }
+  };
 
   const activeSubtopic =
-    skill.subtopics?.find((s) => s.id === activeSubtopicId) ||
-    skill.subtopics?.[0] ||
+    skill?.subtopics?.find((s) => s.id === activeSubtopicId) ||
+    skill?.subtopics?.[0] ||
     null;
 
   // Keep notes 100% empty by default unless user has typed content
@@ -64,7 +104,7 @@ export default function NoteEditor({
   const currentSkillProgress = calculateSkillProgress(skill);
 
   // Filtered subtopics for sidebar
-  const filteredSubtopics = (skill.subtopics || []).filter((s) =>
+  const filteredSubtopics = (skill?.subtopics || []).filter((s) =>
     s.title.toLowerCase().includes(subtopicSearch.toLowerCase())
   );
 
@@ -110,6 +150,7 @@ export default function NoteEditor({
   // Track cursor position
   const updateCursorPos = (target) => {
     if (!target) return;
+   
     const pos = target.selectionStart || 0;
     const textUpToCursor = target.value.substring(0, pos);
     const lineList = textUpToCursor.split('\n');
@@ -224,6 +265,22 @@ export default function NoteEditor({
     return { words, chars };
   }, [activeContent]);
 
+  if (!skill) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-[#0e0e11]">
+        <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  const HandleRightClick = () => { 
+    document, addEventListener("contextmenu" , (event) =>  { 
+      console.log(event.clientX , event.clientY);
+      event.preventDefault();
+      
+    })
+  }
+
   return (
     <div className="h-screen w-full bg-[#18181b] text-[#f4f4f5] flex flex-col overflow-hidden font-sans select-text">
       {/* 1. Notepad Window Title & Tab Bar */}
@@ -321,10 +378,14 @@ export default function NoteEditor({
       </div>
 
       {/* 2. Main Workspace: Simple Sidebar + Clean Notepad Textarea */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1   flex overflow-hidden">
         {/* Left Subtopics Explorer */}
         {isSidebarOpen && (
-          <aside className="w-60 bg-[#141416] border-r border-[#27272a] flex flex-col justify-between shrink-0 select-none">
+          <>
+          <aside
+            className="bg-[#141416] border-r border-[#27272a] flex flex-col justify-between shrink-0 select-none"
+            style={{ width: sidebarWidth, flexBasis: sidebarWidth }}
+          >
             {/* Sidebar Header */}
             <div className="p-3 border-b border-[#27272a] space-y-2">
               <div className="flex items-center justify-between">
@@ -356,7 +417,7 @@ export default function NoteEditor({
             {/* Notes List */}
             <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
               {filteredSubtopics.map((sub) => {
-                const isActive = activeSubtopicId === sub.id;
+                const isActive = activeSubtopic?.id === sub.id;
                 return (
                   <div
                     key={sub.id}
@@ -400,6 +461,25 @@ export default function NoteEditor({
               <span className="text-indigo-400 font-semibold">{currentSkillProgress}% Done</span>
             </div>
           </aside>
+          <div
+            role="separator"
+            aria-label="Resize notes sidebar"
+            aria-orientation="vertical"
+            aria-valuemin={180}
+            aria-valuemax={Math.round(getMaxSidebarWidth())}
+            aria-valuenow={Math.round(sidebarWidth)}
+            tabIndex={0}
+            onPointerDown={handleSidebarResizeStart}
+            onPointerMove={handleSidebarResize}
+            onPointerUp={handleSidebarResizeEnd}
+            onPointerCancel={handleSidebarResizeEnd}
+            onKeyDown={handleSidebarResizeKeyDown}
+            className="group relative z-10 -ml-1 -mr-1 flex w-2 shrink-0 cursor-col-resize touch-none items-center justify-center outline-none"
+            title="Drag to resize notes sidebar"
+          >
+            <span className="h-full w-px bg-transparent transition-colors group-hover:bg-indigo-500 group-focus-visible:bg-indigo-500" />
+          </div>
+          </>
         )}
 
         {/* Right: Clean Notepad Canvas */}
@@ -449,28 +529,6 @@ export default function NoteEditor({
 
               {/* Clean Notepad Textarea Canvas */}
               <div className="flex-1 flex overflow-hidden p-4 sm:p-6 bg-[#18181b] relative">
-                {/* 
-                  Line numbers gutter:
-                  Only display line count on a line when there is text on that line!
-                  If a line is empty, do NOT display the line count.
-                */}
-                {activeContent.length > 0 && (
-                  <div
-                    className="pr-4 select-none text-right font-mono text-xs text-[#52525b] border-r border-[#27272a] overflow-hidden"
-                    style={{ lineHeight: '1.65rem', minWidth: '2.5rem' }}
-                  >
-                    {lines.map((line, i) => {
-                      // Only display number if there is text on this line
-                      const hasText = line.trim() !== '';
-                      return (
-                        <div key={i} className="h-[1.65rem] leading-[1.65rem]">
-                          {hasText ? i + 1 : ''}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
                 {/* Notepad Textarea Area */}
                 <div className="relative flex-1 w-full h-full">
                   {/* Clean "Start typing" placeholder message that removes itself the moment user types */}
@@ -485,7 +543,9 @@ export default function NoteEditor({
                   )}
 
                   <textarea
+
                     ref={textareaRef}
+                    onMouseEnter={() => HandleRightClick() }
                     value={activeContent}
                     onChange={handleTextChange}
                     onKeyDown={handleKeyDown}
@@ -502,6 +562,7 @@ export default function NoteEditor({
                     }}
                     autoFocus
                   />
+
                 </div>
               </div>
             </div>

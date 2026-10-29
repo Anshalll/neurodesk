@@ -9,7 +9,6 @@ import {
   Compass,
   Sparkles,
   BookOpen,
-  FolderCode,
   GraduationCap
 } from 'lucide-react';
 

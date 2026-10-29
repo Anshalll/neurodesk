@@ -2,16 +2,14 @@ import React, { useState } from 'react';
 import {
   ArrowRight,
   MoreVertical,
-  BookOpen,
   CheckCircle,
   Clock,
   Trash2,
   Edit3,
-  Sliders,
-  FileText
+  Sliders
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { getSkillIcon, calculateSkillProgress } from '../utils/helpers';
+import { calculateSkillProgress } from '../utils/helpers';
 
 export default function SkillCard({
   skill,
@@ -56,22 +54,16 @@ export default function SkillCard({
       <div>
         {/* Top Header */}
         <div className="flex items-start justify-between gap-3 mb-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-[#1f1f23] border border-[#27272a] text-indigo-400">
-              {getSkillIcon(skill.icon, 'w-5 h-5')}
-            </div>
-
-            <div>
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-[#1f1f23] text-[#a1a1aa] border border-[#27272a] inline-block mb-1">
-                {skill.category || 'General'}
-              </span>
-              <h3
-                onClick={handleOpenWorkspace}
-                className="font-bold text-base text-white hover:text-indigo-400 cursor-pointer transition-colors line-clamp-1"
-              >
-                {skill.name}
-              </h3>
-            </div>
+          <div className="flex-1 min-w-0">
+            <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-[#1f1f23] text-[#a1a1aa] border border-[#27272a] inline-block mb-1">
+              {skill.category || 'General'}
+            </span>
+            <h3
+              onClick={handleOpenWorkspace}
+              className="font-bold text-base text-white hover:text-indigo-400 cursor-pointer transition-colors line-clamp-1"
+            >
+              {skill.name}
+            </h3>
           </div>
 
           {/* Context Menu */}

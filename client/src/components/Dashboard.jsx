@@ -2,15 +2,14 @@ import React, { useState, useMemo } from 'react';
 import {
   Plus,
   RotateCcw,
-  Search,
   FolderOpen
 } from 'lucide-react';
 import StatsBanner from './StatsBanner';
 import SkillCard from './SkillCard';
-import { CATEGORIES } from '../data/initialData';
 import { calculateSkillProgress } from '../utils/helpers';
 
 export default function Dashboard({
+  
   skills,
   onDeleteSkill,
   onUpdateSkill,
@@ -18,10 +17,15 @@ export default function Dashboard({
   onResetDemoData,
   searchTerm,
   setSearchTerm
+
 }) {
   const [selectedCategory, setSelectedCategory] = useState('All Categories');
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('recent');
+  const categories = useMemo(
+    () => [...new Set(skills.map((skill) => skill.category).filter(Boolean))].sort(),
+    [skills]
+  );
 
   const filteredSkills = useMemo(() => {
     return skills
@@ -113,7 +117,7 @@ export default function Dashboard({
               onChange={(e) => setSelectedCategory(e.target.value)}
               className="px-2.5 py-1 text-xs rounded-lg bg-[#18181b] border border-[#27272a] text-[#d4d4d8] outline-none"
             >
-              {CATEGORIES.map((cat) => (
+              {['All Categories', ...categories].map((cat) => (
                 <option key={cat} value={cat}>
                   {cat}
                 </option>

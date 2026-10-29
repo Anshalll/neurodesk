@@ -2,9 +2,10 @@ import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   BookOpen, LogOut, ArrowLeft, Mail, Calendar,
-  Target, FileText, TrendingUp, Award, Zap
+  Target, FileText, TrendingUp, Award
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { calculateSkillProgress } from '../utils/helpers';
 
 // Helper to format join date
 function formatDate(isoString) {
@@ -40,25 +41,14 @@ function StatCard({ icon: Icon, label, value, color = 'indigo' }) {
   );
 }
 
-export default function UserProfilePage() {
+export default function UserProfilePage({ skills }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-
-  // Pull skills from localStorage for stats
-  const skills = (() => {
-    try {
-      const raw = localStorage.getItem('nurodesk_skills_v1');
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
-  })();
-
-  const totalTopics = skills.reduce((acc, s) => acc + (s.topics?.length || 0), 0);
+  const totalTopics = skills.reduce((acc, skill) => acc + (skill.subtopics?.length || 0), 0);
   const avgProgress = skills.length > 0
-    ? Math.round(skills.reduce((acc, s) => acc + (s.progress || 0), 0) / skills.length)
+    ? Math.round(skills.reduce((acc, skill) => acc + calculateSkillProgress(skill), 0) / skills.length)
     : 0;
-  const masteredCount = skills.filter((s) => (s.progress || 0) >= 100).length;
+  const masteredCount = skills.filter((skill) => calculateSkillProgress(skill) >= 100).length;
 
   const initials = user?.name
     ? user.name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2)
@@ -195,7 +185,7 @@ export default function UserProfilePage() {
                       {skill.name}
                     </p>
                     <p className="text-xs text-[#71717a]">
-                      {skill.topics?.length || 0} topic{(skill.topics?.length || 0) !== 1 ? 's' : ''}
+                      {skill.subtopics?.length || 0} topic{(skill.subtopics?.length || 0) !== 1 ? 's' : ''}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

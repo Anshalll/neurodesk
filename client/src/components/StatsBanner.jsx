@@ -3,10 +3,8 @@ import {
   TrendingUp,
   Target,
   CheckCircle,
-  FileText,
   Flame,
   BookOpen,
-  Award,
   Sparkles
 } from 'lucide-react';
 import { calculateSkillProgress } from '../utils/helpers';

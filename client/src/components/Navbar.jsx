@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  Plus, Search, BookOpen, CheckCircle2, Flame,
+  Plus, Search, BookOpen, CheckCircle2,
   User, LogOut, ChevronDown, Settings
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -10,7 +10,6 @@ export default function Navbar({
   searchTerm,
   setSearchTerm,
   onOpenCreateModal,
-  skillsCount = 0,
   averageProgress = 0,
 }) {
   const { user, logout } = useAuth();

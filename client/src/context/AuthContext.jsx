@@ -2,63 +2,67 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 
 const AuthContext = createContext(null);
 
-const AUTH_STORAGE_KEY = 'nurodesk_auth_user_v1';
-
-// Mock Google profile pictures (for demo)
-const GOOGLE_AVATARS = [
-  'https://lh3.googleusercontent.com/a/default-user=s96-c',
-];
-
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem(AUTH_STORAGE_KEY);
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [initialChecking, setInitialChecking] = useState(true);
   const [error, setError] = useState(null);
-
-  // Persist user to localStorage whenever it changes
-  useEffect(() => {
-    if (user) {
-      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(AUTH_STORAGE_KEY);
-    }
-  }, [user]);
 
   const clearError = useCallback(() => setError(null), []);
 
-  // Email + Password Login (mock)
+  // Check existing session from backend on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function checkSession() {
+      try {
+        const res = await fetch('/api/auth/me', {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted) {
+            if (data.user) {
+              setUser(data.user);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Could not verify the backend session:', err);
+      } finally {
+        if (isMounted) setInitialChecking(false);
+      }
+    }
+    checkSession();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Email + Password Login connected to backend
   const login = useCallback(async (email, password) => {
     setLoading(true);
     setError(null);
     try {
-      // Simulate network delay
-      await new Promise((r) => setTimeout(r, 900));
-
       if (!email || !password) {
         throw new Error('Please enter your email and password.');
       }
-      if (password.length < 6) {
-        throw new Error('Password must be at least 6 characters.');
+
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to sign in. Please check your credentials.');
       }
 
-      // Create mock user from email
-      const name = email.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-      const mockUser = {
-        id: `user_${btoa(email).slice(0, 12)}`,
-        name,
-        email,
-        avatar: null,
-        provider: 'email',
-        joinedAt: new Date().toISOString(),
-      };
-      setUser(mockUser);
-      return mockUser;
+      setUser(data.user);
+      return data.user;
     } catch (err) {
       setError(err.message);
       throw err;
@@ -67,46 +71,11 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  // Google OAuth (mock — simulates Google sign-in)
-  const loginWithGoogle = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      await new Promise((r) => setTimeout(r, 1200));
-
-      // Mock Google user
-      const mockGoogleUsers = [
-        { name: 'Alex Student', email: 'alex.student@gmail.com' },
-        { name: 'Jordan Dev', email: 'jordan.dev@gmail.com' },
-        { name: 'Sam Coder', email: 'sam.coder@gmail.com' },
-      ];
-      const picked = mockGoogleUsers[Math.floor(Math.random() * mockGoogleUsers.length)];
-
-      const mockUser = {
-        id: `google_${btoa(picked.email).slice(0, 12)}`,
-        name: picked.name,
-        email: picked.email,
-        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(picked.name)}&background=6366f1&color=fff&size=96`,
-        provider: 'google',
-        joinedAt: new Date().toISOString(),
-      };
-      setUser(mockUser);
-      return mockUser;
-    } catch (err) {
-      setError(err.message);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Email + Password Register (mock)
+  // Email + Password Register connected to backend
   const register = useCallback(async (name, email, password, confirmPassword) => {
     setLoading(true);
     setError(null);
     try {
-      await new Promise((r) => setTimeout(r, 1000));
-
       if (!name || !email || !password) {
         throw new Error('All fields are required.');
       }
@@ -117,16 +86,20 @@ export function AuthProvider({ children }) {
         throw new Error('Passwords do not match.');
       }
 
-      const mockUser = {
-        id: `user_${btoa(email).slice(0, 12)}`,
-        name: name.trim(),
-        email,
-        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=6366f1&color=fff&size=96`,
-        provider: 'email',
-        joinedAt: new Date().toISOString(),
-      };
-      setUser(mockUser);
-      return mockUser;
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ name: name.trim(), email: email.trim(), password }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to create account. Please try again.');
+      }
+
+      setUser(data.user);
+      return data.user;
     } catch (err) {
       setError(err.message);
       throw err;
@@ -135,15 +108,160 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  // Logout
-  const logout = useCallback(() => {
-    setUser(null);
+  // Request password reset OTP
+  const forgotPassword = useCallback(async (email) => {
+    setLoading(true);
     setError(null);
+    try {
+      if (!email) {
+        throw new Error('Please enter your email address.');
+      }
+
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email: email.trim() }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to request password reset code.');
+      }
+
+      return data;
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Verify OTP code
+  const verifyResetCode = useCallback(async (email, otp) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/auth/verify-reset-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email: email.trim(), otp: otp.trim() }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Invalid or expired verification code.');
+      }
+
+      return data;
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Complete password reset
+  const resetPassword = useCallback(async (email, otp, newPassword) => {
+    setLoading(true);
+    setError(null);
+    try {
+      if (!email || !otp || !newPassword) {
+        throw new Error('All fields are required.');
+      }
+      if (newPassword.length < 6) {
+        throw new Error('Password must be at least 6 characters.');
+      }
+
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          email: email.trim(),
+          otp: otp.trim(),
+          new_password: newPassword,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to reset password.');
+      }
+
+      return data;
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Google OAuth demo / backend login
+  const loginWithGoogle = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          name: 'Alex Student',
+          email: 'alex.student@gmail.com',
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to sign in with Google.');
+      }
+
+      setUser(data.user);
+      return data.user;
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Logout connected to backend
+  const logout = useCallback(async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // ignore network errors on logout
+    } finally {
+      setUser(null);
+      setError(null);
+    }
   }, []);
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, error, clearError, login, loginWithGoogle, register, logout }}
+      value={{
+        user,
+        loading,
+        initialChecking,
+        error,
+        clearError,
+        login,
+        loginWithGoogle,
+        register,
+        forgotPassword,
+        verifyResetCode,
+        resetPassword,
+        logout,
+      }}
     >
       {children}
     </AuthContext.Provider>

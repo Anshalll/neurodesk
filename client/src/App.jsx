@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate, Navigate } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import Dashboard from './components/Dashboard';
@@ -6,23 +6,35 @@ import NoteEditor from './components/NoteEditor';
 import CreateSkillModal from './components/CreateSkillModal';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
+import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import UserProfilePage from './pages/UserProfilePage';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { INITIAL_SKILLS } from './data/initialData';
 import { calculateSkillProgress } from './utils/helpers';
-
-const STORAGE_KEY = 'nurodesk_skills_v1';
 
 // ─── Protected Route wrapper ────────────────────────────────────────────────
 function ProtectedRoute({ children }) {
-  const { user } = useAuth();
+  const { user, initialChecking } = useAuth();
+  if (initialChecking) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-[#0e0e11]">
+        <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
   if (!user) return <Navigate to="/login" replace />;
   return children;
 }
 
 // ─── Public-only Route (redirect logged-in users to /) ──────────────────────
 function PublicRoute({ children }) {
-  const { user } = useAuth();
+  const { user, initialChecking } = useAuth();
+  if (initialChecking) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-[#0e0e11]">
+        <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
   if (user) return <Navigate to="/" replace />;
   return children;
 }
@@ -30,55 +42,136 @@ function PublicRoute({ children }) {
 // ─── Main app content (authenticated) ───────────────────────────────────────
 function AppContent() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
-  const [skills, setSkills] = useState(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch (e) {
-      console.error('Failed to parse stored skills:', e);
-    }
-    return INITIAL_SKILLS;
-  });
+  const [skills, setSkills] = useState([]);
+  const [skillsLoaded, setSkillsLoaded] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const debounceTimers = useRef({});
 
+  // Sync skills and notes from MySQL on authentication
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(skills));
-    } catch (e) {
-      console.error('Failed to persist skills:', e);
+    if (!user) return;
+    let isMounted = true;
+
+    async function fetchSkillsFromBackend() {
+      try {
+        const res = await fetch('/api/skills', {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted && Array.isArray(data.skills)) {
+            setSkills(data.skills);
+          }
+        } else {
+          console.warn(`Could not fetch skills (status ${res.status}).`);
+        }
+      } catch (err) {
+        console.error('Could not fetch skills from MySQL backend:', err);
+      } finally {
+        if (isMounted) setSkillsLoaded(true);
+      }
     }
-  }, [skills]);
+
+    fetchSkillsFromBackend();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user]);
 
   const averageProgress = skills.length > 0
     ? Math.round(skills.reduce((acc, s) => acc + calculateSkillProgress(s), 0) / skills.length)
     : 0;
 
-  const handleCreateSkill = (newSkill) => {
+  const handleCreateSkill = async (newSkill) => {
+    // 1. Optimistic update
     const updated = [newSkill, ...skills];
     setSkills(updated);
     navigate(`/workspace/${newSkill.id}`);
-  };
 
-  const handleUpdateSkill = (skillId, updatedSkill) => {
-    setSkills((prev) => prev.map((s) => (s.id === skillId ? { ...updatedSkill } : s)));
-  };
-
-  const handleDeleteSkill = (skillId) => {
-    if (window.confirm('Are you sure you want to delete this skill workspace?')) {
-      setSkills((prev) => prev.filter((s) => s.id !== skillId));
+    // 2. Persist to MySQL
+    try {
+      const res = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(newSkill),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.skill) {
+          setSkills((prev) => prev.map((s) => (s.id === newSkill.id ? data.skill : s)));
+        }
+      }
+    } catch (err) {
+      console.error('Failed to save skill to MySQL:', err);
     }
   };
 
-  const handleResetDemoData = () => {
+  const handleUpdateSkill = (skillId, updatedSkill) => {
+    // 1. Optimistic update immediately for fluid, responsive typing in NoteEditor
+    setSkills((prev) => prev.map((s) => (s.id === skillId ? { ...updatedSkill } : s)));
+
+    // 2. Debounced save to MySQL
+    if (debounceTimers.current[skillId]) {
+      clearTimeout(debounceTimers.current[skillId]);
+    }
+
+    debounceTimers.current[skillId] = setTimeout(async () => {
+      try {
+        await fetch(`/api/skills/${encodeURIComponent(skillId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(updatedSkill),
+        });
+      } catch (err) {
+        console.error('Failed to sync note/skill update to MySQL:', err);
+      }
+    }, 400);
+  };
+
+  const handleDeleteSkill = async (skillId) => {
+    if (window.confirm('Are you sure you want to delete this skill workspace?')) {
+      setSkills((prev) => prev.filter((s) => s.id !== skillId));
+
+      try {
+        await fetch(`/api/skills/${encodeURIComponent(skillId)}`, {
+          method: 'DELETE',
+          credentials: 'include',
+        });
+      } catch (err) {
+        console.error('Failed to delete skill in MySQL:', err);
+      }
+    }
+  };
+
+  const handleResetDemoData = async () => {
     if (window.confirm('Reset all workspaces to default demo data?')) {
-      setSkills(INITIAL_SKILLS);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_SKILLS));
+      try {
+        const res = await fetch('/api/skills/reset', {
+          method: 'POST',
+          credentials: 'include',
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.skills)) {
+            setSkills(data.skills);
+            return;
+          }
+          console.error('Failed to reset demo data: the server returned an invalid response.');
+        } else {
+          console.error(`Failed to reset demo data (status ${res.status}).`);
+        }
+      } catch (err) {
+        console.error('Failed to reset demo data in MySQL:', err);
+      }
     }
   };
 
@@ -131,6 +224,7 @@ function AppContent() {
             <ProtectedRoute>
               <NoteEditor
                 skills={skills}
+                skillsLoading={!skillsLoaded}
                 onUpdateSkill={handleUpdateSkill}
               />
             </ProtectedRoute>
@@ -142,7 +236,7 @@ function AppContent() {
           path="/profile"
           element={
             <ProtectedRoute>
-              <UserProfilePage />
+              <UserProfilePage skills={skills} />
             </ProtectedRoute>
           }
         />
@@ -161,6 +255,14 @@ function AppContent() {
           element={
             <PublicRoute>
               <RegisterPage />
+            </PublicRoute>
+          }
+        />
+        <Route
+          path="/forgot-password"
+          element={
+            <PublicRoute>
+              <ForgotPasswordPage />
             </PublicRoute>
           }
         />
