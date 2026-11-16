@@ -1,20 +1,28 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import {
-  ArrowLeft,
-  Plus,
-  Trash2,
-  Copy,
-  Check,
-  Download,
-  FileText,
-  SidebarClose,
-  SidebarOpen,
-  Search,
-  CheckSquare,
-  Square
-} from 'lucide-react';
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useMemo,
+  useLayoutEffect,
+  useCallback
+} from 'react';
+import { FileText } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { calculateSkillProgress } from '../utils/helpers';
+import {
+  escapeHtml,
+  renderLatexMath,
+  safeWebUrl,
+  sanitizeNoteHtml
+} from '../utils/noteEditorUtils';
+import AIChatPanel from './AIChatPanel';
+import NoteDocument from './NoteDocument';
+import NoteEditorDialogs from './NoteEditorDialogs';
+import NoteEditorHeader from './NoteEditorHeader';
+import NoteEditorSidebar from './NoteEditorSidebar';
+import NoteEditorStatusBar from './NoteEditorStatusBar';
+import NoteFormattingToolbar from './NoteFormattingToolbar';
+
+const SELECTION_TOOLBAR_DELAY_MS = 300;
 
 export default function NoteEditor({
   skills = [],
@@ -24,116 +32,162 @@ export default function NoteEditor({
   const navigate = useNavigate();
   const { skillId } = useParams();
 
-  const skill = skills.find((s) => s.id === skillId) || skills[0] || null;
+  const skill = skills.find((item) => item.id === skillId) || skills[0] || null;
 
   useEffect(() => {
     if (!skillsLoading && !skill) {
-      navigate('/');
+      navigate('/dashboard');
     }
   }, [skill, skillsLoading, navigate]);
 
+  // Page state
+  const firstSubtopic = skill?.subtopics?.[0] || null;
   const [activeSubtopicId, setActiveSubtopicId] = useState(
-    skill?.subtopics && skill.subtopics.length > 0 ? skill.subtopics[0].id : null
+    firstSubtopic ? firstSubtopic.id : null
   );
-
-
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [subtopicSearch, setSubtopicSearch] = useState('');
+  const [isAiChatOpen, setIsAiChatOpen] = useState(true);
+
+  // Save and editor status
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [saveStatus, setSaveStatus] = useState('Saved');
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
-  const [fontFamily, setFontFamily] = useState('mono'); // 'mono' or 'sans'
-  const [fontSize, setFontSize] = useState('14px');
-  const [isOpenContext, setisOpenContext] = useState(false)
-  const textareaRef = useRef(null);
+  const [activeFormat, setActiveFormat] = useState('');
+  const [fontSize, setFontSize] = useState('16px');
+  const [textColor, setTextColor] = useState('#818cf8');
+  const [textAlignment, setTextAlignment] = useState('left');
+  const [isTableCellSelected, setIsTableCellSelected] = useState(false);
+  const [isFormattingToolbarVisible, setIsFormattingToolbarVisible] = useState(false);
+  const [formattingToolbarAnchor, setFormattingToolbarAnchor] = useState(null);
+  const [formattingToolbarPosition, setFormattingToolbarPosition] = useState({
+    left: 8,
+    top: 8,
+    menuPlacement: 'below',
+    menuAlignment: 'left',
+    menuMaxHeight: 320,
+    maxWidth: 400
+  });
+
+  // Link and formula dialog state
+  const [dialogType, setDialogType] = useState(null);
+  const [linkText, setLinkText] = useState('');
+  const [linkUrl, setLinkUrl] = useState('');
+  const [dialogError, setDialogError] = useState('');
+  const [formula, setFormula] = useState('\\frac{a}{b} + c^2');
+
+  // Refs keep the editor and its selection available to formatting actions.
+  const editorRef = useRef(null);
+  const editorViewportRef = useRef(null);
+  const formattingToolbarRef = useRef(null);
+  const formattingToolbarDismissedRef = useRef(false);
+  const selectionToolbarTimeoutRef = useRef(null);
+  const loadedEditorNoteId = useRef(null);
   const sidebarResizeRef = useRef(null);
+  const savedRangeRef = useRef(null);
+  const existingLinkRef = useRef(null);
+
+  // Sidebar resizing
   const getMaxSidebarWidth = () => Math.max(180, Math.min(480, window.innerWidth * 0.6));
   const [sidebarWidth, setSidebarWidth] = useState(() => Math.min(240, getMaxSidebarWidth()));
 
-  const handleSidebarResizeStart = (e) => {
-    e.preventDefault();
-    e.currentTarget.setPointerCapture(e.pointerId);
+  const handleSidebarResizeStart = (event) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
     sidebarResizeRef.current = {
-      pointerId: e.pointerId,
-      startX: e.clientX,
+      pointerId: event.pointerId,
+      startX: event.clientX,
       startWidth: sidebarWidth
     };
   };
 
-  const handleSidebarResize = (e) => {
-    const resize = sidebarResizeRef.current;
-    if (!resize || resize.pointerId !== e.pointerId) return;
+  const handleSidebarResize = (event) => {
+    const resizeState = sidebarResizeRef.current;
+    if (!resizeState || resizeState.pointerId !== event.pointerId) return;
 
-    setSidebarWidth(Math.min(
-      getMaxSidebarWidth(),
-      Math.max(180, resize.startWidth + e.clientX - resize.startX)
-    ));
+    const horizontalChange = event.clientX - resizeState.startX;
+    const requestedWidth = resizeState.startWidth + horizontalChange;
+    const nextWidth = Math.min(getMaxSidebarWidth(), Math.max(180, requestedWidth));
+    setSidebarWidth(nextWidth);
   };
 
-  const handleSidebarResizeEnd = (e) => {
-    if (sidebarResizeRef.current?.pointerId === e.pointerId) {
+  const handleSidebarResizeEnd = (event) => {
+    if (sidebarResizeRef.current?.pointerId === event.pointerId) {
       sidebarResizeRef.current = null;
     }
   };
 
-  const handleSidebarResizeKeyDown = (e) => {
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      e.preventDefault();
-      const direction = e.key === 'ArrowRight' ? 1 : -1;
-      setSidebarWidth((width) => Math.min(
-        getMaxSidebarWidth(),
-        Math.max(180, width + direction * 16)
-      ));
-    } else if (e.key === 'Home') {
-      e.preventDefault();
+  const handleSidebarResizeKeyDown = (event) => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowRight' ? 1 : -1;
+      const widthChange = direction * 16;
+      setSidebarWidth((currentWidth) => {
+        const requestedWidth = currentWidth + widthChange;
+        return Math.min(getMaxSidebarWidth(), Math.max(180, requestedWidth));
+      });
+    } else if (event.key === 'Home') {
+      event.preventDefault();
       setSidebarWidth(180);
-    } else if (e.key === 'End') {
-      e.preventDefault();
+    } else if (event.key === 'End') {
+      event.preventDefault();
       setSidebarWidth(getMaxSidebarWidth());
     }
   };
 
+  // The selected note and its content
   const activeSubtopic =
-    skill?.subtopics?.find((s) => s.id === activeSubtopicId) ||
+    skill?.subtopics?.find((subtopic) => subtopic.id === activeSubtopicId) ||
     skill?.subtopics?.[0] ||
     null;
 
-  // Keep notes 100% empty by default unless user has typed content
-  const activeContent = typeof activeSubtopic?.content === 'string' ? activeSubtopic.content : '';
+  const activeNoteContent = typeof activeSubtopic?.content === 'string'
+    ? activeSubtopic.content
+    : '';
 
-  const currentSkillProgress = calculateSkillProgress(skill);
+  useEffect(() => {
+    if (editorRef.current && loadedEditorNoteId.current !== activeSubtopic?.id) {
+      editorRef.current.innerHTML = sanitizeNoteHtml(activeNoteContent);
+      loadedEditorNoteId.current = activeSubtopic?.id;
+    }
+  }, [activeSubtopic?.id, activeNoteContent]);
 
-  // Filtered subtopics for sidebar
-  const filteredSubtopics = (skill?.subtopics || []).filter((s) =>
-    s.title.toLowerCase().includes(subtopicSearch.toLowerCase())
-  );
+  // Search and display information for the selected note
+  const searchText = subtopicSearch.toLowerCase();
+  const filteredSubtopics = (skill?.subtopics || []).filter((subtopic) => {
+    return subtopic.title.toLowerCase().includes(searchText);
+  });
 
-  // Split content into lines to calculate line text status
-  const lines = useMemo(() => {
-    return activeContent.split('\n');
-  }, [activeContent]);
+  const plainText = useMemo(() => {
+    if (!activeNoteContent) return '';
 
-  // Count only lines that actually have text
+    const sanitizedContent = sanitizeNoteHtml(activeNoteContent);
+    const parsedDocument = new DOMParser().parseFromString(sanitizedContent, 'text/html');
+
+    return parsedDocument.body.innerText || parsedDocument.body.textContent || '';
+  }, [activeNoteContent]);
+
+  // Count only lines that contain text.
   const filledLinesCount = useMemo(() => {
-    if (!activeContent) return 0;
-    return lines.filter((l) => l.trim() !== '').length;
-  }, [lines, activeContent]);
+    if (!plainText) return 0;
 
-  // Update text content on change
-  const handleTextChange = (e) => {
-    const newText = e.target.value;
-    updateCursorPos(e.target);
+    const lines = plainText.split('\n');
+    const linesWithText = lines.filter((line) => line.trim() !== '');
+    return linesWithText.length;
+  }, [plainText]);
+
+  const updateActiveNote = (changes) => {
+    if (!activeSubtopic) return;
 
     setSaveStatus('Saving...');
-    const updatedSubtopics = skill.subtopics.map((sub) => {
-      if (sub.id === activeSubtopic.id) {
-        return {
-          ...sub,
-          content: newText,
-          updatedAt: 'Just now'
-        };
-      }
-      return sub;
+    const updatedSubtopics = skill.subtopics.map((subtopic) => {
+      if (subtopic.id !== activeSubtopic.id) return subtopic;
+
+      return {
+        ...subtopic,
+        ...changes,
+        updatedAt: 'Just now'
+      };
     });
 
     onUpdateSkill(skill.id, {
@@ -142,70 +196,736 @@ export default function NoteEditor({
       subtopics: updatedSubtopics
     });
 
-    setTimeout(() => {
-      setSaveStatus('Saved');
-    }, 250);
+    window.setTimeout(() => setSaveStatus('Saved'), 450);
   };
 
-  // Track cursor position
-  const updateCursorPos = (target) => {
-    if (!target) return;
-   
-    const pos = target.selectionStart || 0;
-    const textUpToCursor = target.value.substring(0, pos);
-    const lineList = textUpToCursor.split('\n');
-    const line = lineList.length;
-    const col = lineList[lineList.length - 1].length + 1;
-    setCursorPos({ line, col });
+  const updateCursorPos = () => {
+    const selection = window.getSelection();
+    const editor = editorRef.current;
+
+    if (!selection?.rangeCount || !editor?.contains(selection.anchorNode)) {
+      return;
+    }
+
+    const cursorRange = selection.getRangeAt(0).cloneRange();
+    cursorRange.selectNodeContents(editor);
+    cursorRange.setEnd(selection.anchorNode, selection.anchorOffset);
+
+    const textBeforeCursor = cursorRange.toString();
+    const linesBeforeCursor = textBeforeCursor.split('\n');
+    const currentLine = linesBeforeCursor.length;
+    const currentColumn = linesBeforeCursor[linesBeforeCursor.length - 1].length + 1;
+    setCursorPos({ line: currentLine, col: currentColumn });
   };
 
-  // Support Tab key indentation
-  const handleKeyDown = (e) => {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      const textarea = textareaRef.current;
-      if (!textarea) return;
+  // Close the current dialog when the user presses Escape
+  useEffect(() => {
+    if (!dialogType) return undefined;
 
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const value = textarea.value;
+    const handleDialogKeyDown = (event) => {
+      if (event.key === 'Escape') setDialogType(null);
+    };
 
-      textarea.value = value.substring(0, start) + '    ' + value.substring(end);
-      textarea.selectionStart = textarea.selectionEnd = start + 4;
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => document.removeEventListener('keydown', handleDialogKeyDown);
+  }, [dialogType]);
 
-      handleTextChange({ target: textarea });
+  // Rich text editing actions
+  const handleEditorInput = () => {
+    if (!editorRef.current) return;
+
+    const content = sanitizeNoteHtml(editorRef.current.innerHTML);
+    updateActiveNote({ content });
+    updateCursorPos();
+  };
+
+  const runEditorCommand = (commandName, commandValue = null) => {
+    editorRef.current?.focus();
+    document.execCommand(commandName, false, commandValue);
+    handleEditorInput();
+    setActiveFormat(commandName);
+  };
+
+  const applyFontSize = (sizeInPixels) => {
+    const browserFontSizes = {
+      '10px': '1',
+      '13px': '2',
+      '16px': '3',
+      '18px': '4',
+      '24px': '5',
+      '32px': '6',
+      '48px': '7'
+    };
+    const browserFontSize = browserFontSizes[sizeInPixels];
+
+    if (!browserFontSize) return;
+
+    restoreSavedEditorSelection();
+    runEditorCommand('fontSize', browserFontSize);
+    setFontSize(sizeInPixels);
+  };
+
+  const applyTextColor = (color) => {
+    restoreSavedEditorSelection();
+    runEditorCommand('foreColor', color);
+    setTextColor(color);
+  };
+
+  const applyTextAlignment = (alignment) => {
+    const alignmentCommands = {
+      left: 'justifyLeft',
+      center: 'justifyCenter',
+      right: 'justifyRight'
+    };
+    const command = alignmentCommands[alignment];
+
+    if (!command) return;
+
+    restoreSavedEditorSelection();
+    runEditorCommand(command);
+    setTextAlignment(alignment);
+  };
+
+  const insertHtml = (htmlToInsert) => {
+    restoreSavedEditorSelection();
+    editorRef.current?.focus();
+    document.execCommand('insertHTML', false, htmlToInsert);
+    handleEditorInput();
+  };
+
+  // Save the current selection so dialogs can edit the selected text later.
+  const captureEditorSelection = useCallback(() => {
+    const selection = window.getSelection();
+    const selectionIsInsideEditor = selection?.rangeCount
+      && editorRef.current?.contains(selection.anchorNode);
+
+    if (selectionIsInsideEditor) {
+      const anchorNode = selection.anchorNode;
+      const anchorElement = anchorNode?.nodeType === Node.ELEMENT_NODE
+        ? anchorNode
+        : anchorNode?.parentElement;
+      const selectedLink = anchorElement?.closest('a');
+
+      existingLinkRef.current = selectedLink && editorRef.current?.contains(selectedLink)
+        ? selectedLink
+        : null;
+      savedRangeRef.current = selection.getRangeAt(0).cloneRange();
+    }
+
+    return selection;
+  }, []);
+
+  const showFormattingToolbar = useCallback((anchor) => {
+    setFormattingToolbarAnchor(anchor);
+    setIsFormattingToolbarVisible(true);
+  }, []);
+
+  const hideFormattingToolbar = useCallback(() => {
+    setFormattingToolbarAnchor(null);
+    setIsFormattingToolbarVisible(false);
+    setIsTableCellSelected(false);
+  }, []);
+
+  const clearSelectionToolbarTimeout = useCallback(() => {
+    if (selectionToolbarTimeoutRef.current !== null) {
+      window.clearTimeout(selectionToolbarTimeoutRef.current);
+      selectionToolbarTimeoutRef.current = null;
+    }
+  }, []);
+
+  const getSelectedTableCell = useCallback((range) => {
+    const selection = window.getSelection();
+    const selectedNode = range?.startContainer || selection?.anchorNode;
+    const selectedElement = selectedNode?.nodeType === Node.ELEMENT_NODE
+      ? selectedNode
+      : selectedNode?.parentElement;
+    const tableCell = selectedElement?.closest('td, th');
+
+    return editorRef.current?.contains(tableCell) ? tableCell : null;
+  }, []);
+
+  const updateSelectedTableState = useCallback(() => {
+    const table = getSelectedTableCell()?.closest('table');
+    setIsTableCellSelected(Boolean(table));
+  }, [getSelectedTableCell]);
+
+  const handleEditorSelectionChange = useCallback((hideWhenCollapsed = false) => {
+    formattingToolbarDismissedRef.current = false;
+    const selection = window.getSelection();
+    const editor = editorRef.current;
+    const selectionIsInsideEditor = selection?.rangeCount
+      && !selection.isCollapsed
+      && editor?.contains(selection.anchorNode)
+      && editor.contains(selection.focusNode);
+
+    if (selectionIsInsideEditor) {
+      captureEditorSelection();
+      clearSelectionToolbarTimeout();
+      selectionToolbarTimeoutRef.current = window.setTimeout(() => {
+        selectionToolbarTimeoutRef.current = null;
+        const currentSelection = window.getSelection();
+        const selectionIsStillInsideEditor = currentSelection?.rangeCount
+          && !currentSelection.isCollapsed
+          && editor?.contains(currentSelection.anchorNode)
+          && editor.contains(currentSelection.focusNode);
+
+        if (selectionIsStillInsideEditor) {
+          captureEditorSelection();
+          updateSelectedTableState();
+          showFormattingToolbar({ type: 'selection' });
+        }
+      }, SELECTION_TOOLBAR_DELAY_MS);
+    } else if (hideWhenCollapsed) {
+      clearSelectionToolbarTimeout();
+      hideFormattingToolbar();
+    }
+  }, [
+    captureEditorSelection,
+    clearSelectionToolbarTimeout,
+    hideFormattingToolbar,
+    updateSelectedTableState,
+    showFormattingToolbar
+  ]);
+
+  const handleEditorContextMenu = useCallback((event) => {
+    event.preventDefault();
+    formattingToolbarDismissedRef.current = false;
+    clearSelectionToolbarTimeout();
+    captureEditorSelection();
+    updateSelectedTableState();
+    showFormattingToolbar({
+      type: 'point',
+      x: event.clientX,
+      y: event.clientY
+    });
+  }, [
+    captureEditorSelection,
+    clearSelectionToolbarTimeout,
+    showFormattingToolbar,
+    updateSelectedTableState
+  ]);
+
+  const restoreSavedEditorSelection = () => {
+    const editor = editorRef.current;
+    const savedRange = savedRangeRef.current;
+
+    if (!editor || !savedRange || !editor.contains(savedRange.startContainer)) {
+      return;
+    }
+
+    editor.focus();
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    selection.removeAllRanges();
+    selection.addRange(savedRange.cloneRange());
+  };
+
+  const runToolbarEditorCommand = (commandName, commandValue = null) => {
+    restoreSavedEditorSelection();
+    runEditorCommand(commandName, commandValue);
+  };
+
+  const getAiTextRange = () => {
+    const editor = editorRef.current;
+    const savedRange = savedRangeRef.current;
+    if (!editor || !savedRange || !editor.contains(savedRange.startContainer)) return null;
+
+    const range = savedRange.cloneRange();
+    if (!range.collapsed && range.toString().trim()) return range;
+
+    const startNode = range.startContainer;
+    const startElement = startNode.nodeType === Node.ELEMENT_NODE
+      ? startNode
+      : startNode.parentElement;
+    const lineElement = startElement?.closest(
+      'p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, td, th, div'
+    );
+
+    if (lineElement && lineElement !== editor && editor.contains(lineElement)) {
+      range.selectNodeContents(lineElement);
+      if (range.toString().trim()) return range;
+    }
+
+    if (startNode.nodeType === Node.TEXT_NODE) {
+      const lineText = startNode.textContent || '';
+      let lineStart = Math.min(range.startOffset, lineText.length);
+      let lineEnd = lineStart;
+
+      while (lineStart > 0 && lineText[lineStart - 1] !== '\n') lineStart -= 1;
+      while (lineEnd < lineText.length && lineText[lineEnd] !== '\n') lineEnd += 1;
+
+      range.setStart(startNode, lineStart);
+      range.setEnd(startNode, lineEnd);
+      if (range.toString().trim()) return range;
+    }
+
+    return null;
+  };
+
+  const handleAiRequest = async (action, question) => {
+    const editor = editorRef.current;
+    const range = getAiTextRange();
+    if (!editor || !range) {
+      throw new Error('Select text or place the cursor on a line first.');
+    }
+
+    const sourceText = range.toString().trim();
+    const response = await fetch('/api/ai/note-assistant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        action,
+        text: sourceText,
+        question,
+        noteTitle: activeSubtopic?.title || ''
+      })
+    });
+
+    let responseData;
+    try {
+      responseData = await response.json();
+    } catch {
+      throw new Error('The AI service returned an invalid response.');
+    }
+
+    if (!response.ok) {
+      throw new Error(responseData.error || 'The AI request failed.');
+    }
+    if (typeof responseData.answer !== 'string' || !responseData.answer.trim()) {
+      throw new Error('The AI service returned an empty response.');
+    }
+
+    const answer = responseData.answer.trim();
+    if (action === 'ask') return answer;
+
+    if (!editor.contains(range.startContainer) || range.toString().trim() !== sourceText) {
+      throw new Error('The note changed while AI was working. Please try again.');
+    }
+
+    range.deleteContents();
+    const fragment = document.createDocumentFragment();
+    const insertedNodes = [];
+    answer.replace(/\r\n/g, '\n').split('\n').forEach((line, index) => {
+      if (index > 0) {
+        const lineBreak = document.createElement('br');
+        fragment.appendChild(lineBreak);
+        insertedNodes.push(lineBreak);
+      }
+
+      const textNode = document.createTextNode(line);
+      fragment.appendChild(textNode);
+      insertedNodes.push(textNode);
+    });
+    range.insertNode(fragment);
+
+    const caretRange = document.createRange();
+    caretRange.setStartAfter(insertedNodes[insertedNodes.length - 1]);
+    caretRange.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(caretRange);
+    savedRangeRef.current = caretRange.cloneRange();
+    handleEditorInput();
+
+    return answer;
+  };
+
+  useEffect(() => {
+    const handlePointerDown = (event) => {
+      const clickedEditor = editorRef.current?.contains(event.target);
+      const clickedToolbar = formattingToolbarRef.current?.contains(event.target);
+
+      if (clickedEditor) clearSelectionToolbarTimeout();
+      if (!clickedEditor && !clickedToolbar) {
+        formattingToolbarDismissedRef.current = true;
+        clearSelectionToolbarTimeout();
+        hideFormattingToolbar();
+      }
+    };
+    const handleDocumentSelectionChange = () => {
+      if (!formattingToolbarDismissedRef.current) handleEditorSelectionChange();
+    };
+    const handleScroll = (event) => {
+      if (formattingToolbarRef.current?.contains(event.target)) return;
+
+      formattingToolbarDismissedRef.current = true;
+      clearSelectionToolbarTimeout();
+      hideFormattingToolbar();
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('selectionchange', handleDocumentSelectionChange);
+    document.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleScroll);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('selectionchange', handleDocumentSelectionChange);
+      document.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleScroll);
+      clearSelectionToolbarTimeout();
+    };
+  }, [clearSelectionToolbarTimeout, handleEditorSelectionChange, hideFormattingToolbar]);
+
+  useLayoutEffect(() => {
+    if (!isFormattingToolbarVisible || !formattingToolbarRef.current) return;
+
+    const toolbar = formattingToolbarRef.current;
+    const viewport = editorViewportRef.current?.getBoundingClientRect();
+    const bounds = viewport || {
+      left: 0,
+      top: 0,
+      right: window.innerWidth,
+      bottom: window.innerHeight,
+      width: window.innerWidth
+    };
+    const toolbarWidth = toolbar.offsetWidth;
+    const toolbarHeight = toolbar.offsetHeight;
+    const minimumLeft = bounds.left + 8;
+    const minimumTop = bounds.top + 8;
+    const maximumLeft = bounds.right - toolbarWidth - 8;
+    const maximumTop = bounds.bottom - toolbarHeight - 8;
+    let left;
+    let top;
+
+    if (formattingToolbarAnchor?.type === 'point') {
+      left = formattingToolbarAnchor.x + 8;
+      top = formattingToolbarAnchor.y + 8;
+      if (left > maximumLeft) left = formattingToolbarAnchor.x - toolbarWidth - 8;
+      if (top > maximumTop) top = formattingToolbarAnchor.y - toolbarHeight - 8;
+    } else {
+      const selection = window.getSelection();
+      if (!selection?.rangeCount) return;
+
+      const selectionBounds = selection.getRangeAt(0).getBoundingClientRect();
+      left = selectionBounds.left + (selectionBounds.width - toolbarWidth) / 2;
+      top = selectionBounds.top - toolbarHeight - 8;
+      if (top < minimumTop) top = selectionBounds.bottom + 8;
+    }
+
+    left = Math.max(minimumLeft, Math.min(left, maximumLeft));
+    top = Math.max(minimumTop, Math.min(top, maximumTop));
+
+    const spaceAbove = Math.max(0, top - bounds.top - 8);
+    const spaceBelow = Math.max(0, bounds.bottom - top - toolbarHeight - 8);
+    const menuPlacement = spaceBelow >= 300 || spaceBelow >= spaceAbove ? 'below' : 'above';
+    const menuMaxHeight = Math.max(100, menuPlacement === 'below' ? spaceBelow : spaceAbove);
+    const menuAlignment = left + 270 > bounds.right - 8 ? 'right' : 'left';
+
+    const nextPosition = {
+      left,
+      top,
+      menuPlacement,
+      menuAlignment,
+      menuMaxHeight,
+      maxWidth: Math.max(120, bounds.width - 16)
+    };
+
+    setFormattingToolbarPosition((currentPosition) => {
+      const positionIsUnchanged = Object.keys(nextPosition).every((key) => {
+        return currentPosition[key] === nextPosition[key];
+      });
+
+      return positionIsUnchanged ? currentPosition : nextPosition;
+    });
+  }, [
+    formattingToolbarAnchor,
+    formattingToolbarPosition.maxWidth,
+    isFormattingToolbarVisible
+  ]);
+
+  const openLinkDialog = () => {
+    const selection = captureEditorSelection();
+    const selectedText = selection?.toString() || '';
+    const existingLinkText = existingLinkRef.current?.textContent || '';
+    const existingLinkUrl = existingLinkRef.current?.getAttribute('href') || '';
+
+    setLinkText(existingLinkText || selectedText);
+    setLinkUrl(existingLinkUrl);
+    setDialogError('');
+    setDialogType('link');
+  };
+
+  const getSavedEditorRange = () => {
+    const savedRange = savedRangeRef.current;
+    const savedRangeIsInsideEditor = savedRange
+      && editorRef.current?.contains(savedRange.startContainer);
+
+    if (savedRangeIsInsideEditor) {
+      return savedRange.cloneRange();
+    }
+
+    const rangeAtEndOfEditor = document.createRange();
+    rangeAtEndOfEditor.selectNodeContents(editorRef.current);
+    rangeAtEndOfEditor.collapse(false);
+    return rangeAtEndOfEditor;
+  };
+
+  const placeCaretAfter = (element) => {
+    const caretRange = document.createRange();
+    caretRange.setStartAfter(element);
+    caretRange.collapse(true);
+
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(caretRange);
+  };
+
+  const handleLinkSubmit = (event) => {
+    event.preventDefault();
+    const displayText = linkText.trim();
+
+    if (!displayText) {
+      setDialogError('Add the text you want people to click.');
+      return;
+    }
+
+    const safeUrl = safeWebUrl(linkUrl.trim());
+    if (!safeUrl) {
+      setDialogError('Enter a valid http or https link.');
+      return;
+    }
+
+    editorRef.current?.focus();
+    const savedLink = existingLinkRef.current;
+    const savedLinkIsInEditor = savedLink && editorRef.current?.contains(savedLink);
+    let linkElement;
+
+    if (savedLinkIsInEditor) {
+      linkElement = savedLink;
+    } else {
+      linkElement = document.createElement('a');
+      const savedRange = getSavedEditorRange();
+      savedRange.deleteContents();
+      savedRange.insertNode(linkElement);
+    }
+
+    linkElement.textContent = displayText;
+    linkElement.href = safeUrl;
+    linkElement.target = '_blank';
+    linkElement.rel = 'noopener noreferrer';
+    placeCaretAfter(linkElement);
+    handleEditorInput();
+    setDialogType(null);
+  };
+
+  const openFormulaDialog = () => {
+    captureEditorSelection();
+    setFormula('\\frac{a}{b} + c^2');
+    setDialogError('');
+    setDialogType('formula');
+  };
+
+  const handleFormulaSubmit = (event) => {
+    event.preventDefault();
+
+    if (!formula.trim()) {
+      setDialogError('Enter a formula to insert.');
+      return;
+    }
+
+    editorRef.current?.focus();
+    const formulaHtml = renderLatexMath(formula);
+    const parsedFormula = new DOMParser().parseFromString(formulaHtml, 'text/html');
+    const mathElement = parsedFormula.body.firstElementChild;
+    const savedRange = getSavedEditorRange();
+
+    savedRange.deleteContents();
+    savedRange.insertNode(mathElement);
+    placeCaretAfter(mathElement);
+    handleEditorInput();
+    setDialogType(null);
+  };
+
+  const insertCodeBlock = () => {
+    const selectedText = savedRangeRef.current?.toString()
+      || window.getSelection()?.toString()
+      || '';
+    const codeToInsert = selectedText || '// Write your code here';
+    const safeCode = escapeHtml(codeToInsert);
+
+    insertHtml(`<pre><code>${safeCode}</code></pre><p><br></p>`);
+  };
+
+  const clearFormatting = () => {
+    restoreSavedEditorSelection();
+    const editor = editorRef.current;
+    const selection = window.getSelection();
+    if (!editor || !selection?.rangeCount || !editor.contains(selection.anchorNode)) return;
+
+    editor.focus();
+    const anchorNode = selection.anchorNode;
+    const anchorElement = anchorNode.nodeType === Node.ELEMENT_NODE
+      ? anchorNode
+      : anchorNode.parentElement;
+    const codeBlock = anchorElement?.closest('pre');
+
+    if (codeBlock && editor.contains(codeBlock)) {
+      const paragraph = document.createElement('p');
+      const codeLines = codeBlock.textContent.split(/\r?\n/);
+
+      codeLines.forEach((lineText, lineIndex) => {
+        if (lineIndex > 0) {
+          paragraph.appendChild(document.createElement('br'));
+        }
+        paragraph.appendChild(document.createTextNode(lineText));
+      });
+
+      codeBlock.replaceWith(paragraph);
+    } else {
+      const formattedBlock = anchorElement?.closest('h1, h2, h3, h4, blockquote');
+      const inlineCode = anchorElement?.closest('code');
+
+      if (formattedBlock && editor.contains(formattedBlock)) {
+        const paragraph = document.createElement('p');
+        while (formattedBlock.firstChild) {
+          paragraph.appendChild(formattedBlock.firstChild);
+        }
+        formattedBlock.replaceWith(paragraph);
+      }
+
+      if (inlineCode && editor.contains(inlineCode)) {
+        inlineCode.replaceWith(...inlineCode.childNodes);
+      }
+    }
+
+    document.execCommand('removeFormat', false, null);
+    document.execCommand('unlink', false, null);
+    handleEditorInput();
+  };
+
+  const insertImage = () => {
+    const imageUrlInput = window.prompt('Paste an image URL');
+    if (!imageUrlInput) return;
+
+    const safeImageUrl = safeWebUrl(imageUrlInput.trim());
+    if (!safeImageUrl) {
+      window.alert('Please enter a valid http or https image URL.');
+      return;
+    }
+
+    insertHtml(`<p><img src="${escapeHtml(safeImageUrl)}" alt=""></p><p><br></p>`);
+  };
+
+  const insertTable = () => {
+    const emptyTableRow = '<tr><td><br></td><td><br></td><td><br></td></tr>';
+    const tableRows = emptyTableRow.repeat(3);
+
+    insertHtml(`<table><tbody>${tableRows}</tbody></table><p><br></p>`);
+  };
+
+  const focusTableCell = (cell) => {
+    if (!cell) return;
+
+    editorRef.current?.focus();
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    range.collapse(true);
+
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    selection.removeAllRanges();
+    selection.addRange(range);
+    savedRangeRef.current = range.cloneRange();
+  };
+
+  const removeSelectedTableColumn = () => {
+    restoreSavedEditorSelection();
+    const selectedCell = getSelectedTableCell();
+    const table = selectedCell?.closest('table');
+    if (!selectedCell || !table) return;
+
+    const selectedRow = selectedCell.parentElement;
+    const rows = Array.from(table.rows);
+    const columnIndex = selectedCell.cellIndex;
+    const columnCount = Math.max(...rows.map((row) => row.cells.length));
+    if (columnCount <= 1 || selectedRow.cells.length <= 1) return;
+
+    rows.forEach((row) => {
+      if (row.cells[columnIndex]) row.deleteCell(columnIndex);
+    });
+
+    const remainingCells = selectedRow.cells;
+    const nextCell = remainingCells[Math.min(columnIndex, remainingCells.length - 1)];
+    focusTableCell(nextCell);
+    updateSelectedTableState();
+    handleEditorInput();
+  };
+
+  const addTableColumn = (table) => {
+    if (!editorRef.current?.contains(table) || table.tagName !== 'TABLE') return;
+
+    const rows = Array.from(table.rows);
+    if (rows.length === 0) return;
+
+    let newCellToFocus = null;
+    rows.forEach((row) => {
+      const isHeaderRow = Boolean(row.closest('thead')) || row.cells[0]?.tagName === 'TH';
+      const cellTagName = isHeaderRow
+        ? 'th'
+        : 'td';
+      const newCell = document.createElement(cellTagName);
+      newCell.innerHTML = '<br>';
+      row.appendChild(newCell);
+      newCellToFocus = newCell;
+    });
+
+    focusTableCell(newCellToFocus);
+    handleEditorInput();
+  };
+
+  const addTableRow = (table) => {
+    if (!editorRef.current?.contains(table) || table.tagName !== 'TABLE') return;
+
+    const rows = Array.from(table.rows);
+    if (rows.length === 0) return;
+
+    const columnCount = Math.max(...rows.map((row) => row.cells.length));
+
+    const tableBody = table.tBodies[0] || table.createTBody();
+    const newRow = document.createElement('tr');
+    for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+      const newCell = document.createElement('td');
+      newCell.innerHTML = '<br>';
+      newRow.appendChild(newCell);
+    }
+
+    tableBody.appendChild(newRow);
+    focusTableCell(newRow.cells[0]);
+    handleEditorInput();
+  };
+
+  const handlePaste = (event) => {
+    event.preventDefault();
+    const text = event.clipboardData.getData('text/plain');
+    document.execCommand('insertText', false, text);
+    handleEditorInput();
+  };
+
+  const handleEditorKeyDown = (event) => {
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      runEditorCommand('insertHTML', '&nbsp;&nbsp;&nbsp;&nbsp;');
     }
   };
 
-  // Toggle completion
-  const handleToggleComplete = () => {
-    if (!activeSubtopic) return;
-    const nextDone = !activeSubtopic.completed;
-    const updatedSubtopics = skill.subtopics.map((sub) => {
-      if (sub.id === activeSubtopic.id) {
-        return {
-          ...sub,
-          completed: nextDone,
-          status: nextDone ? 'mastered' : 'in_progress',
-          updatedAt: 'Just now'
-        };
-      }
-      return sub;
-    });
-
+  const updateSkillNotes = (subtopics) => {
     onUpdateSkill(skill.id, {
       ...skill,
       updatedAt: 'Just now',
-      subtopics: updatedSubtopics
+      subtopics
     });
   };
 
-  // Add new subtopic / note
+  // Add and delete notes
   const handleAddNote = () => {
     const noteCount = (skill.subtopics || []).length + 1;
-    const newId = `sub_${Date.now()}`;
+    const newNoteId = `sub_${crypto.randomUUID()}`;
     const newNote = {
-      id: newId,
+      id: newNoteId,
       title: `${noteCount}. New Note`,
       emoji: '📄',
       completed: false,
@@ -214,56 +934,126 @@ export default function NoteEditor({
     };
 
     const updated = [...(skill.subtopics || []), newNote];
-    onUpdateSkill(skill.id, {
-      ...skill,
-      updatedAt: 'Just now',
-      subtopics: updated
-    });
-    setActiveSubtopicId(newId);
+    updateSkillNotes(updated);
+    setActiveSubtopicId(newNoteId);
   };
 
-  // Delete note
-  const handleDeleteNote = (subId, e) => {
-    e?.stopPropagation();
+  const handleDeleteNote = (subtopicId, event) => {
+    event?.stopPropagation();
     if (!confirm('Delete this note?')) return;
-    const updated = (skill.subtopics || []).filter((s) => s.id !== subId);
-    onUpdateSkill(skill.id, {
-      ...skill,
-      updatedAt: 'Just now',
-      subtopics: updated
+
+    const updatedSubtopics = (skill.subtopics || []).filter((subtopic) => {
+      return subtopic.id !== subtopicId;
     });
-    if (activeSubtopicId === subId) {
-      setActiveSubtopicId(updated.length > 0 ? updated[0].id : null);
+
+    updateSkillNotes(updatedSubtopics);
+
+    if (activeSubtopicId === subtopicId) {
+      const nextNoteId = updatedSubtopics.length > 0 ? updatedSubtopics[0].id : null;
+      setActiveSubtopicId(nextNoteId);
     }
   };
 
-  // Download note as plain text
-  const handleDownloadNote = () => {
-    if (!activeSubtopic) return;
-    const blob = new Blob([activeContent], { type: 'text/plain;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `${activeSubtopic.title.replace(/[^a-z0-9]/gi, '_')}.txt`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleDuplicateNote = (subtopicId) => {
+    const notes = skill.subtopics || [];
+    const sourceIndex = notes.findIndex((note) => note.id === subtopicId);
+    if (sourceIndex === -1) return;
+
+    const sourceNote = notes[sourceIndex];
+    const duplicateNote = {
+      ...sourceNote,
+      id: `sub_${crypto.randomUUID()}`,
+      title: `${sourceNote.title} (copy)`,
+      completed: false,
+      status: 'in_progress',
+      updatedAt: 'Just now'
+    };
+    const updatedSubtopics = [...notes];
+    updatedSubtopics.splice(sourceIndex + 1, 0, duplicateNote);
+
+    updateSkillNotes(updatedSubtopics);
+    setActiveSubtopicId(duplicateNote.id);
   };
 
-  // Copy note text
-  const handleCopyNote = () => {
-    navigator.clipboard.writeText(activeContent);
-    setCopyFeedback(true);
-    setTimeout(() => setCopyFeedback(false), 1500);
+  const handleRenameNote = (subtopicId, requestedTitle) => {
+    const title = requestedTitle.trim();
+    if (!title) return;
+
+    const updatedSubtopics = (skill.subtopics || []).map((note) => (
+      note.id === subtopicId ? { ...note, title, updatedAt: 'Just now' } : note
+    ));
+
+    updateSkillNotes(updatedSubtopics);
   };
 
-  // Words & chars calculation
+  const handleMoveNote = (subtopicId, direction) => {
+    const updatedSubtopics = [...(skill.subtopics || [])];
+    const currentIndex = updatedSubtopics.findIndex((note) => note.id === subtopicId);
+    const nextIndex = currentIndex + direction;
+
+    if (currentIndex === -1 || nextIndex < 0 || nextIndex >= updatedSubtopics.length) return;
+
+    [updatedSubtopics[currentIndex], updatedSubtopics[nextIndex]] = [
+      updatedSubtopics[nextIndex],
+      updatedSubtopics[currentIndex]
+    ];
+    updateSkillNotes(updatedSubtopics);
+  };
+
+  const handleReorderNotes = (sourceId, targetId, placeAfter) => {
+    const updatedSubtopics = [...(skill.subtopics || [])];
+    const sourceIndex = updatedSubtopics.findIndex((note) => note.id === sourceId);
+    const targetIndex = updatedSubtopics.findIndex((note) => note.id === targetId);
+
+    if (sourceIndex === -1 || targetIndex === -1 || sourceIndex === targetIndex) return;
+
+    const [movingNote] = updatedSubtopics.splice(sourceIndex, 1);
+    const adjustedTargetIndex = targetIndex - (sourceIndex < targetIndex ? 1 : 0);
+    const insertIndex = adjustedTargetIndex + (placeAfter ? 1 : 0);
+    updatedSubtopics.splice(insertIndex, 0, movingNote);
+    updateSkillNotes(updatedSubtopics);
+  };
+
+  // Copy and download the plain-text version of the note
+  const handleDownloadNote = (note = activeSubtopic) => {
+    if (!note) return;
+
+    const sanitizedContent = sanitizeNoteHtml(note.content || '');
+    const parsedNote = new DOMParser().parseFromString(sanitizedContent, 'text/html');
+    const noteText = parsedNote.body.innerText || parsedNote.body.textContent || '';
+
+    const blob = new Blob([noteText], { type: 'text/plain;charset=utf-8;' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const downloadLink = document.createElement('a');
+    downloadLink.href = downloadUrl;
+    downloadLink.setAttribute(
+      'download',
+      `${note.title.replace(/[^a-z0-9]/gi, '_')}.txt`
+    );
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
+  };
+
+  const handleCopyNote = async () => {
+    try {
+      await navigator.clipboard.writeText(plainText);
+      setCopyFeedback(true);
+      window.setTimeout(() => setCopyFeedback(false), 1500);
+    } catch (error) {
+      console.error('Failed to copy note:', error);
+      setSaveStatus('Copy failed');
+    }
+  };
+
+  // Word and character counts for the selected note
   const stats = useMemo(() => {
-    const text = activeContent || '';
-    const chars = text.length;
-    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-    return { words, chars };
-  }, [activeContent]);
+    const trimmedText = plainText.trim();
+    const characterCount = plainText.length;
+    const wordCount = trimmedText ? trimmedText.split(/\s+/).length : 0;
+
+    return { words: wordCount, chars: characterCount };
+  }, [plainText]);
 
   if (!skill) {
     return (
@@ -273,298 +1063,91 @@ export default function NoteEditor({
     );
   }
 
-  const HandleRightClick = () => { 
-    document, addEventListener("contextmenu" , (event) =>  { 
-      console.log(event.clientX , event.clientY);
-      event.preventDefault();
-      
-    })
-  }
-
   return (
-    <div className="h-screen w-full bg-[#18181b] text-[#f4f4f5] flex flex-col overflow-hidden font-sans select-text">
-      {/* 1. Notepad Window Title & Tab Bar */}
-      <div className="h-10 bg-[#121215] border-b border-[#27272a] flex items-center justify-between px-2 shrink-0 select-none">
-        {/* Left: Back to Home + Tabs */}
-        <div className="flex items-center gap-1.5 overflow-x-auto h-full scrollbar-none">
-          <button
-            onClick={() => navigate('/')}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold text-[#a1a1aa] hover:text-white hover:bg-[#27272a] transition-colors shrink-0"
-            title="Back to Skills Dashboard"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Dashboard</span>
-          </button>
-
-          <div className="h-4 w-[1px] bg-[#27272a] mx-1 shrink-0" />
-
-          {/* Active Notepad File Tab */}
-          {activeSubtopic && (
-            <div className="flex items-center gap-2 h-7 px-3 rounded bg-[#1f1f23] text-xs font-medium text-white border-b-2 border-indigo-500 shadow-sm shrink-0">
-              <FileText className="w-3.5 h-3.5 text-indigo-400" />
-              <span className="truncate max-w-[180px]">
-                {activeSubtopic.title}.txt
-              </span>
-              {activeSubtopic.completed && (
-                <span className="text-[10px] text-emerald-400 font-bold ml-1">✓</span>
-              )}
-            </div>
-          )}
-
-          {/* New Tab Button */}
-          <button
-            onClick={handleAddNote}
-            className="p-1 rounded text-[#71717a] hover:text-white hover:bg-[#27272a] transition-colors shrink-0"
-            title="Create new note"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Right: Skill Progress & Utility Controls */}
-        <div className="flex items-center gap-3 shrink-0 text-xs">
-          {/* Skill Mastery Tracker */}
-          <div className="hidden sm:flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-[#18181b] border border-[#27272a] text-[11px] font-mono">
-            <span className="text-[#a1a1aa]">{skill.name}:</span>
-            <span className="text-indigo-400 font-bold">{currentSkillProgress}% Mastered</span>
-          </div>
-
-          {/* Mark Complete Checkbox */}
-          {activeSubtopic && (
-            <button
-              onClick={handleToggleComplete}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                activeSubtopic.completed
-                  ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60'
-                  : 'bg-[#27272a] text-[#a1a1aa] hover:text-white'
-              }`}
-            >
-              {activeSubtopic.completed ? (
-                <CheckSquare className="w-3.5 h-3.5 text-emerald-400" />
-              ) : (
-                <Square className="w-3.5 h-3.5" />
-              )}
-              <span>{activeSubtopic.completed ? 'Completed' : 'Mark as Done'}</span>
-            </button>
-          )}
-
-          {/* Copy Text */}
-          <button
-            onClick={handleCopyNote}
-            className="p-1.5 rounded text-[#a1a1aa] hover:text-white hover:bg-[#27272a] transition-colors"
-            title="Copy entire note"
-          >
-            {copyFeedback ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-          </button>
-
-          {/* Download Text */}
-          <button
-            onClick={handleDownloadNote}
-            className="p-1.5 rounded text-[#a1a1aa] hover:text-white hover:bg-[#27272a] transition-colors"
-            title="Save note as .txt file"
-          >
-            <Download className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Toggle Sidebar */}
-          <button
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            className="p-1.5 rounded text-[#a1a1aa] hover:text-white hover:bg-[#27272a] transition-colors"
-            title={isSidebarOpen ? 'Hide Notes Sidebar' : 'Show Notes Sidebar'}
-          >
-            {isSidebarOpen ? <SidebarClose className="w-4 h-4" /> : <SidebarOpen className="w-4 h-4" />}
-          </button>
-        </div>
-      </div>
+    <div className="Scroller h-screen w-full bg-[#18181b] text-[#f4f4f5] flex flex-col overflow-hidden font-sans select-text">
+      <NoteEditorHeader
+        skill={skill}
+        activeSubtopic={activeSubtopic}
+        onBack={() => navigate('/dashboard')}
+        onAddNote={handleAddNote}
+        onCopyNote={handleCopyNote}
+        copyFeedback={copyFeedback}
+        onDownloadNote={handleDownloadNote}
+        isSidebarOpen={isSidebarOpen}
+        onToggleSidebar={() => setIsSidebarOpen((open) => !open)}
+        saveStatus={saveStatus}
+      />
 
       {/* 2. Main Workspace: Simple Sidebar + Clean Notepad Textarea */}
-      <div className="flex-1   flex overflow-hidden">
-        {/* Left Subtopics Explorer */}
-        {isSidebarOpen && (
-          <>
-          <aside
-            className="bg-[#141416] border-r border-[#27272a] flex flex-col justify-between shrink-0 select-none"
-            style={{ width: sidebarWidth, flexBasis: sidebarWidth }}
-          >
-            {/* Sidebar Header */}
-            <div className="p-3 border-b border-[#27272a] space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wider">
-                  Notes ({skill.subtopics?.length || 0})
-                </span>
-                <button
-                  onClick={handleAddNote}
-                  className="flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded bg-indigo-600 hover:bg-indigo-500 text-white"
-                >
-                  <Plus className="w-3 h-3" />
-                  <span>New</span>
-                </button>
-              </div>
-
-              {/* Simple Filter input */}
-              <div className="relative">
-                <Search className="w-3 h-3 text-[#71717a] absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={subtopicSearch}
-                  onChange={(e) => setSubtopicSearch(e.target.value)}
-                  placeholder="Filter notes..."
-                  className="w-full pl-7 pr-2 py-1 text-xs rounded bg-[#1f1f23] border border-[#27272a] text-white placeholder-[#71717a] outline-none focus:border-indigo-500"
-                />
-              </div>
-            </div>
-
-            {/* Notes List */}
-            <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
-              {filteredSubtopics.map((sub) => {
-                const isActive = activeSubtopic?.id === sub.id;
-                return (
-                  <div
-                    key={sub.id}
-                    onClick={() => setActiveSubtopicId(sub.id)}
-                    className={`group flex items-center justify-between px-2.5 py-1.5 rounded cursor-pointer text-xs transition-colors ${
-                      isActive
-                        ? 'bg-[#27272a] text-white font-medium shadow-sm'
-                        : 'text-[#a1a1aa] hover:bg-[#1c1c1f] hover:text-white'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 min-w-0 flex-1">
-                      <span className="text-xs select-none">
-                        {sub.completed ? '✓' : '📄'}
-                      </span>
-                      <span className={`truncate ${sub.completed ? 'text-emerald-400' : ''}`}>
-                        {sub.title}
-                      </span>
-                    </div>
-
-                    <button
-                      onClick={(e) => handleDeleteNote(sub.id, e)}
-                      className="opacity-0 group-hover:opacity-100 p-0.5 text-[#71717a] hover:text-rose-400 rounded transition-opacity"
-                      title="Delete note"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                );
-              })}
-
-              {filteredSubtopics.length === 0 && (
-                <div className="text-center py-6 text-xs text-[#71717a]">
-                  No matching notes.
-                </div>
-              )}
-            </div>
-
-            {/* Sidebar Bottom Info */}
-            <div className="p-2.5 border-t border-[#27272a] bg-[#101012] text-[11px] text-[#71717a] flex items-center justify-between">
-              <span>{skill.name}</span>
-              <span className="text-indigo-400 font-semibold">{currentSkillProgress}% Done</span>
-            </div>
-          </aside>
-          <div
-            role="separator"
-            aria-label="Resize notes sidebar"
-            aria-orientation="vertical"
-            aria-valuemin={180}
-            aria-valuemax={Math.round(getMaxSidebarWidth())}
-            aria-valuenow={Math.round(sidebarWidth)}
-            tabIndex={0}
-            onPointerDown={handleSidebarResizeStart}
-            onPointerMove={handleSidebarResize}
-            onPointerUp={handleSidebarResizeEnd}
-            onPointerCancel={handleSidebarResizeEnd}
-            onKeyDown={handleSidebarResizeKeyDown}
-            className="group relative z-10 -ml-1 -mr-1 flex w-2 shrink-0 cursor-col-resize touch-none items-center justify-center outline-none"
-            title="Drag to resize notes sidebar"
-          >
-            <span className="h-full w-px bg-transparent transition-colors group-hover:bg-indigo-500 group-focus-visible:bg-indigo-500" />
-          </div>
-          </>
-        )}
+      <div className="relative flex-1 flex min-w-0 overflow-hidden Scroller">
+        <NoteEditorSidebar
+          isOpen={isSidebarOpen}
+          skill={skill}
+          activeSubtopic={activeSubtopic}
+          filteredSubtopics={filteredSubtopics}
+          subtopicSearch={subtopicSearch}
+          onSearchChange={setSubtopicSearch}
+          onAddNote={handleAddNote}
+          onSelectSubtopic={setActiveSubtopicId}
+          onDeleteNote={handleDeleteNote}
+          onDuplicateNote={handleDuplicateNote}
+          onRenameNote={handleRenameNote}
+          onDownloadNote={handleDownloadNote}
+          onMoveNote={handleMoveNote}
+          onReorderNotes={handleReorderNotes}
+          sidebarWidth={sidebarWidth}
+          maxSidebarWidth={getMaxSidebarWidth()}
+          onResizeStart={handleSidebarResizeStart}
+          onResize={handleSidebarResize}
+          onResizeEnd={handleSidebarResizeEnd}
+          onResizeKeyDown={handleSidebarResizeKeyDown}
+        />
 
         {/* Right: Clean Notepad Canvas */}
-        <main className="flex-1 flex flex-col bg-[#1c1c20] overflow-hidden relative">
+        <main
+          ref={editorViewportRef}
+          className="Scroller flex min-w-0 flex-1 flex-col overflow-hidden bg-[#101014]"
+        >
           {activeSubtopic ? (
-            <div className="flex-1 flex flex-col h-full">
-              {/* Note Title Header */}
-              <div className="px-6 pt-4 pb-2 border-b border-[#27272a] flex items-center justify-between gap-4 shrink-0 bg-[#1c1c20]">
-                <input
-                  type="text"
-                  value={activeSubtopic.title}
-                  onChange={(e) => {
-                    const newTitle = e.target.value;
-                    const updatedSubtopics = skill.subtopics.map((sub) =>
-                      sub.id === activeSubtopic.id ? { ...sub, title: newTitle } : sub
-                    );
-                    onUpdateSkill(skill.id, {
-                      ...skill,
-                      subtopics: updatedSubtopics
-                    });
-                  }}
-                  className="w-full text-lg font-bold text-white bg-transparent border-none outline-none focus:ring-0 p-0 placeholder-[#71717a]"
-                  placeholder="Note Title..."
-                />
-
-                {/* Font and formatting toggles */}
-                <div className="flex items-center gap-2 shrink-0 text-xs text-[#71717a]">
-                  <button
-                    onClick={() => setFontFamily(fontFamily === 'mono' ? 'sans' : 'mono')}
-                    className="px-2 py-0.5 rounded bg-[#27272a] hover:bg-[#323236] text-[#d4d4d8] text-[11px] font-mono"
-                    title="Toggle Font Family"
-                  >
-                    {fontFamily === 'mono' ? 'Monospace' : 'Sans-Serif'}
-                  </button>
-                  <select
-                    value={fontSize}
-                    onChange={(e) => setFontSize(e.target.value)}
-                    className="bg-[#27272a] text-[#d4d4d8] text-[11px] px-2 py-0.5 rounded border border-[#3f3f46] outline-none"
-                  >
-                    <option value="13px">13px</option>
-                    <option value="14px">14px</option>
-                    <option value="16px">16px</option>
-                    <option value="18px">18px</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Clean Notepad Textarea Canvas */}
-              <div className="flex-1 flex overflow-hidden p-4 sm:p-6 bg-[#18181b] relative">
-                {/* Notepad Textarea Area */}
-                <div className="relative flex-1 w-full h-full">
-                  {/* Clean "Start typing" placeholder message that removes itself the moment user types */}
-                  {!activeContent && (
-                    <div
-                      onClick={() => textareaRef.current?.focus()}
-                      className="absolute left-4 top-0 text-[#52525b] pointer-events-none select-none text-sm tracking-wide"
-                      style={{ lineHeight: '1.65rem' }}
-                    >
-                      Start typing...
-                    </div>
-                  )}
-
-                  <textarea
-
-                    ref={textareaRef}
-                    onMouseEnter={() => HandleRightClick() }
-                    value={activeContent}
-                    onChange={handleTextChange}
-                    onKeyDown={handleKeyDown}
-                    onKeyUp={(e) => updateCursorPos(e.target)}
-                    onClick={(e) => updateCursorPos(e.target)}
-                    spellCheck={false}
-                    className={`w-full h-full pl-4 bg-transparent border-none outline-none focus:ring-0 text-[#f4f4f5] resize-none leading-relaxed ${
-                      fontFamily === 'mono' ? 'font-mono' : 'font-sans'
-                    }`}
-                    style={{
-                      fontSize,
-                      lineHeight: '1.65rem',
-                      tabSize: 4
-                    }}
-                    autoFocus
-                  />
-
-                </div>
-              </div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              {isFormattingToolbarVisible && <NoteFormattingToolbar
+                activeFormat={activeFormat}
+                runEditorCommand={runToolbarEditorCommand}
+                insertHtml={insertHtml}
+                insertCodeBlock={insertCodeBlock}
+                openLinkDialog={openLinkDialog}
+                openFormulaDialog={openFormulaDialog}
+                insertImage={insertImage}
+                insertTable={insertTable}
+                clearFormatting={clearFormatting}
+                fontSize={fontSize}
+                textColor={textColor}
+                textAlignment={textAlignment}
+                onFontSizeChange={applyFontSize}
+                onTextColorChange={applyTextColor}
+                onTextAlignmentChange={applyTextAlignment}
+                onCaptureSelection={captureEditorSelection}
+                isTableCellSelected={isTableCellSelected}
+                onRemoveTableColumn={removeSelectedTableColumn}
+                onAiRequest={handleAiRequest}
+                toolbarRef={formattingToolbarRef}
+                position={formattingToolbarPosition}
+              />}
+              <NoteDocument
+                skill={skill}
+                activeSubtopic={activeSubtopic}
+                stats={stats}
+                editorRef={editorRef}
+                onTitleChange={updateActiveNote}
+                onInput={handleEditorInput}
+                onCursorUpdate={updateCursorPos}
+                onSelectionChange={() => handleEditorSelectionChange(true)}
+                onContextMenu={handleEditorContextMenu}
+                onAddTableColumn={addTableColumn}
+                onAddTableRow={addTableRow}
+                onPaste={handlePaste}
+                onKeyDown={handleEditorKeyDown}
+              />
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-center p-8 text-[#71717a]">
@@ -579,41 +1162,35 @@ export default function NoteEditor({
             </div>
           )}
         </main>
+        <AIChatPanel
+          noteTitle={activeSubtopic?.title}
+          activeNoteId={activeSubtopic?.id}
+          notes={skill.subtopics || []}
+          isOpen={isAiChatOpen}
+          onToggle={() => setIsAiChatOpen((open) => !open)}
+        />
       </div>
 
-      {/* 3. Classic Notepad Bottom Status Bar */}
-      <footer className="h-6 bg-[#121215] border-t border-[#27272a] px-3 flex items-center justify-between text-[11px] text-[#71717a] font-mono select-none shrink-0">
-        {/* Left: Position & Stats (Only display line counts when there is text!) */}
-        <div className="flex items-center gap-4">
-          <span>
-            Ln {cursorPos.line}, Col {cursorPos.col}
-          </span>
-          {stats.words > 0 && (
-            <span>
-              {stats.words} words, {stats.chars} chars
-            </span>
-          )}
-          {/* Only display line count when there is some text on lines! */}
-          {filledLinesCount > 0 && (
-            <span>
-              {filledLinesCount} {filledLinesCount === 1 ? 'line' : 'lines'}
-            </span>
-          )}
-        </div>
+      <NoteEditorStatusBar
+        cursorPos={cursorPos}
+        stats={stats}
+        filledLinesCount={filledLinesCount}
+      />
 
-        {/* Right: Encoding, Status, and Zoom */}
-        <div className="flex items-center gap-4">
-          <span className="text-emerald-400 flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-            <span>{saveStatus}</span>
-          </span>
-          <span className="hidden sm:inline">UTF-8</span>
-          <span className="hidden sm:inline">Windows (CRLF)</span>
-          <span className="text-indigo-400 font-bold">
-            {activeSubtopic?.completed ? '✓ Mastered' : `${currentSkillProgress}% Progress`}
-          </span>
-        </div>
-      </footer>
+      <NoteEditorDialogs
+        dialogType={dialogType}
+        onClose={() => setDialogType(null)}
+        onLinkSubmit={handleLinkSubmit}
+        onFormulaSubmit={handleFormulaSubmit}
+        linkText={linkText}
+        onLinkTextChange={setLinkText}
+        linkUrl={linkUrl}
+        onLinkUrlChange={setLinkUrl}
+        formula={formula}
+        onFormulaChange={setFormula}
+        formulaPreview={dialogType === 'formula' ? renderLatexMath(formula || 'x') : ''}
+        dialogError={dialogError}
+      />
     </div>
   );
 }

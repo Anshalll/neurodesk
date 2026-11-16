@@ -10,6 +10,7 @@ from db.check_db_connection import check
 from models.users import User, AuthCredential, OTP
 from models.skills import Skill, Page, Note
 from controllers.auth_controller import auth_bp
+from controllers.ai_controller import ai_bp
 from controllers.skill_controller import skill_bp
 from Errors.app_errors import AppError
 
@@ -61,6 +62,7 @@ def create_app():
 
     # Register blueprints
     app.register_blueprint(auth_bp)
+    app.register_blueprint(ai_bp)
     app.register_blueprint(skill_bp)
 
     @app.route("/api/health", methods=["GET"])

@@ -76,7 +76,7 @@ export default function UserProfilePage({ skills }) {
       <header className="relative z-10 border-b border-[#27272a] bg-[#0e0e11]/80 backdrop-blur-md">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-4">
           <button
-            onClick={() => navigate('/')}
+            onClick={() => navigate('/dashboard')}
             className="flex items-center gap-2 text-[#71717a] hover:text-white transition-colors text-sm font-medium"
           >
             <ArrowLeft className="w-4 h-4" />

@@ -45,7 +45,7 @@ export default function Navbar({
         {/* Logo and Brand */}
         <div className="flex items-center gap-6">
           <Link
-            to="/"
+            to="/dashboard"
             className="flex items-center gap-2.5 group text-left transition-transform active:scale-98"
           >
             <div className="w-8 h-8 rounded-lg bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">

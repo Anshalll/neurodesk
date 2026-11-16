@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate, Navigate } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import Dashboard from './components/Dashboard';
@@ -10,6 +10,10 @@ import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import UserProfilePage from './pages/UserProfilePage';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { calculateSkillProgress } from './utils/helpers';
+
+const HomePage = lazy(() => import('./pages/HomePage'));
+const PricingPage = lazy(() => import('./pages/PricingPage'));
+const AboutPage = lazy(() => import('./pages/AboutPage'));
 
 // ─── Protected Route wrapper ────────────────────────────────────────────────
 function ProtectedRoute({ children }) {
@@ -35,7 +39,7 @@ function PublicRoute({ children }) {
       </div>
     );
   }
-  if (user) return <Navigate to="/" replace />;
+  if (user) return <Navigate to="/dashboard" replace />;
   return children;
 }
 
@@ -176,11 +180,36 @@ function AppContent() {
   };
 
   return (
-    <div className="h-screen text-[#f4f4f5] flex flex-col font-sans overflow-hidden selection:bg-indigo-500/30 selection:text-indigo-200">
+    <div className="min-h-screen text-[#f4f4f5] flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
       <Routes>
-        {/* ── Home Route ─────────────────────────────────────────────────── */}
         <Route
           path="/"
+          element={
+            <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-[#0d0e13]"><div className="h-7 w-7 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" /></div>}>
+              <HomePage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/pricing"
+          element={
+            <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-[#0d0e13]"><div className="h-7 w-7 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" /></div>}>
+              <PricingPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/about"
+          element={
+            <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-[#0d0e13]"><div className="h-7 w-7 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" /></div>}>
+              <AboutPage />
+            </Suspense>
+          }
+        />
+
+        {/* ── Learning dashboard ────────────────────────────────────────── */}
+        <Route
+          path="/dashboard"
           element={
             <ProtectedRoute>
               <div className="h-screen flex flex-col overflow-hidden relative">
@@ -271,7 +300,7 @@ function AppContent() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
 
-      {/* Create Skill Workspace Modal (only relevant on home) */}
+      {/* Create Skill Workspace Modal (only relevant on the dashboard) */}
       <CreateSkillModal
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}

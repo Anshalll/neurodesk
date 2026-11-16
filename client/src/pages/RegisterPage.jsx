@@ -19,7 +19,7 @@ export default function RegisterPage() {
     clearError();
     try {
       await register(name, email, password, confirm);
-      navigate('/');
+      navigate('/dashboard');
     } catch {
       // error shown via context
     }
@@ -30,7 +30,7 @@ export default function RegisterPage() {
     setGoogleLoading(true);
     try {
       await loginWithGoogle();
-      navigate('/');
+      navigate('/dashboard');
     } catch {
       // error shown via context
     } finally {

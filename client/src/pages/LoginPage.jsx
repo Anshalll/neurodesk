@@ -17,7 +17,7 @@ export default function LoginPage() {
     clearError();
     try {
       await login(email, password);
-      navigate('/');
+      navigate('/dashboard');
     } catch {
       // error shown via context
     }
@@ -28,7 +28,7 @@ export default function LoginPage() {
     setGoogleLoading(true);
     try {
       await loginWithGoogle();
-      navigate('/');
+      navigate('/dashboard');
     } catch {
       // error shown via context
     } finally {
