@@ -1,4 +1,5 @@
-import React, { useRef, useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Check,
   ChevronDown,
@@ -9,6 +10,7 @@ import {
   MoreVertical,
   Plus,
   Search,
+  Sparkles,
   Trash2,
   Copy,
   Pencil,
@@ -22,8 +24,12 @@ const sampleQuizzes = [
     title: 'Inheritance basics',
     questionCount: 5,
     duration: '4 min',
-    sampleQuestion: 'Which keyword lets a Java class inherit another class?',
-    choices: ['extends', 'implements', 'inherits']
+    questions: [{
+      id: 'inheritance-keyword',
+      type: 'mcq',
+      prompt: 'Which keyword lets a Java class inherit another class?',
+      choices: ['extends', 'implements', 'inherits']
+    }]
   },
   {
     id: 'polymorphism',
@@ -31,8 +37,19 @@ const sampleQuizzes = [
     title: 'Polymorphism check',
     questionCount: 8,
     duration: '6 min',
-    sampleQuestion: 'What does method overriding allow a subclass to do?',
-    choices: ['Replace a parent method', 'Create a new package', 'Hide a constructor']
+    questions: [
+      {
+        id: 'method-overriding',
+        type: 'mcq',
+        prompt: 'What does method overriding allow a subclass to do?',
+        choices: ['Replace a parent method', 'Create a new package', 'Hide a constructor']
+      },
+      {
+        id: 'polymorphism-definition',
+        type: 'text',
+        prompt: 'In your own words, what is polymorphism?'
+      }
+    ]
   }
 ];
 
@@ -45,10 +62,13 @@ export default function NoteEditorSidebar({
   onSearchChange,
   onAddNote,
   onSelectSubtopic,
+  activeQuizId,
+  onSelectQuiz,
   onDeleteNote,
   onDuplicateNote,
   onRenameNote,
   onDownloadNote,
+  onGenerateQuiz,
   onMoveNote,
   onReorderNotes,
   sidebarWidth,
@@ -61,8 +81,53 @@ export default function NoteEditorSidebar({
   const [openMenuNoteId, setOpenMenuNoteId] = useState(null);
   const [renamingNoteId, setRenamingNoteId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
-  const [expandedQuizId, setExpandedQuizId] = useState(null);
+  const [generatingQuizNoteId, setGeneratingQuizNoteId] = useState(null);
+  const [quizGenerationError, setQuizGenerationError] = useState(null);
   const draggedNoteIdRef = useRef(null);
+  const noteMenuAnchorRef = useRef(null);
+  const noteMenuRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (!openMenuNoteId || !noteMenuAnchorRef.current || !noteMenuRef.current) {
+      return undefined;
+    }
+
+    const positionMenu = () => {
+      const anchorBounds = noteMenuAnchorRef.current.getBoundingClientRect();
+      const menuBounds = noteMenuRef.current.getBoundingClientRect();
+      const padding = 8;
+      const gap = 4;
+      const spaceBelow = window.innerHeight - padding - anchorBounds.bottom - gap;
+      const spaceAbove = anchorBounds.top - gap - padding;
+      const opensAbove = spaceBelow < menuBounds.height && spaceAbove > spaceBelow;
+      const availableHeight = Math.max(0, opensAbove ? spaceAbove : spaceBelow);
+      const maxHeight = Math.min(window.innerHeight - padding * 2, availableHeight);
+      const menuHeight = Math.min(menuBounds.height, maxHeight);
+      const requestedTop = opensAbove
+        ? anchorBounds.top - gap - menuHeight
+        : anchorBounds.bottom + gap;
+      const top = Math.max(
+        padding,
+        Math.min(requestedTop, window.innerHeight - padding - menuHeight)
+      );
+      const left = Math.max(
+        padding,
+        Math.min(
+          anchorBounds.right - menuBounds.width,
+          window.innerWidth - padding - menuBounds.width
+        )
+      );
+
+      noteMenuRef.current.style.left = `${left}px`;
+      noteMenuRef.current.style.top = `${top}px`;
+      noteMenuRef.current.style.maxHeight = `${maxHeight}px`;
+      noteMenuRef.current.style.visibility = 'visible';
+    };
+
+    positionMenu();
+    window.addEventListener('resize', positionMenu);
+    return () => window.removeEventListener('resize', positionMenu);
+  }, [openMenuNoteId]);
 
   if (!isOpen) return null;
 
@@ -84,6 +149,23 @@ export default function NoteEditorSidebar({
     event.stopPropagation();
     setOpenMenuNoteId(null);
     action();
+  };
+
+  const generateQuizForNote = async (event, note) => {
+    event.stopPropagation();
+    setOpenMenuNoteId(null);
+    setQuizGenerationError(null);
+    setGeneratingQuizNoteId(note.id);
+    try {
+      await onGenerateQuiz(note);
+    } catch (error) {
+      setQuizGenerationError({
+        noteId: note.id,
+        message: error instanceof Error ? error.message : 'Could not generate a quiz.'
+      });
+    } finally {
+      setGeneratingQuizNoteId(null);
+    }
   };
 
   const dropNoteOnTarget = (event, targetId) => {
@@ -130,7 +212,10 @@ export default function NoteEditorSidebar({
           </div>
         </div>
 
-        <div className="flex-1 Scroller space-y-5 overflow-y-auto p-2">
+        <div
+          className="flex-1 Scroller space-y-5 overflow-y-auto p-2"
+          onScroll={() => setOpenMenuNoteId(null)}
+        >
           <section>
             <h3 className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#71717a]">
               Your notes
@@ -143,7 +228,6 @@ export default function NoteEditorSidebar({
                 });
                 const isRenaming = renamingNoteId === subtopic.id;
                 const isMenuOpen = openMenuNoteId === subtopic.id;
-                const menuOpensUp = noteIndex >= (skill.subtopics || []).length - 2;
 
                 return (
                   <div key={subtopic.id} className="space-y-1">
@@ -236,6 +320,9 @@ export default function NoteEditorSidebar({
                       aria-expanded={isMenuOpen}
                       onClick={(event) => {
                         event.stopPropagation();
+                        if (!isMenuOpen) {
+                          noteMenuAnchorRef.current = event.currentTarget;
+                        }
                         setOpenMenuNoteId(isMenuOpen ? null : subtopic.id);
                       }}
                       className="shrink-0 rounded p-1 text-[#71717a] transition hover:bg-white/[0.08] hover:text-white group-hover:opacity-100 focus-visible:opacity-100"
@@ -243,12 +330,17 @@ export default function NoteEditorSidebar({
                       <MoreVertical size={14} />
                     </button>
 
-                    {isMenuOpen && (
+                    {isMenuOpen && createPortal(
                       <div
+                        ref={noteMenuRef}
                         role="menu"
-                        className={`absolute right-0 z-40 min-w-40 rounded-lg border border-white/10 bg-[#202027] p-1.5 shadow-xl shadow-black/40 ${
-                          menuOpensUp ? 'bottom-full mb-1' : 'top-full mt-1'
-                        }`}
+                        className="fixed z-[100] w-40 max-w-[calc(100vw-16px)] overflow-y-auto rounded-lg border border-white/10 bg-[#202027] p-1.5 shadow-xl shadow-black/40"
+                        style={{
+                          left: 0,
+                          top: 0,
+                          maxHeight: 'calc(100vh - 16px)',
+                          visibility: 'hidden'
+                        }}
                         onClick={(event) => event.stopPropagation()}
                       >
                         <button
@@ -313,6 +405,16 @@ export default function NoteEditorSidebar({
                         <button
                           type="button"
                           role="menuitem"
+                          disabled={generatingQuizNoteId !== null}
+                          onClick={(event) => generateQuizForNote(event, subtopic)}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-indigo-200 hover:bg-indigo-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <Sparkles size={13} />
+                          Generate quiz
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
                           onClick={(event) => runNoteMenuAction(
                             event,
                             () => onDeleteNote(subtopic.id, event)
@@ -322,26 +424,43 @@ export default function NoteEditorSidebar({
                           <Trash2 size={13} />
                           Delete
                         </button>
-                      </div>
+                      </div>,
+                      document.body
                     )}
                   </div>
-                  {sampleQuizzes
-                    .filter((quiz) => quiz.noteKeywords.some((keyword) => {
+                  {generatingQuizNoteId === subtopic.id && (
+                    <p role="status" className="ml-8 px-1 text-[10px] text-indigo-200">
+                      Generating quiz…
+                    </p>
+                  )}
+                  {quizGenerationError?.noteId === subtopic.id && (
+                    <p role="alert" className="ml-8 px-1 text-[10px] text-rose-300">
+                      {quizGenerationError.message}
+                    </p>
+                  )}
+                  {[
+                    ...sampleQuizzes.filter((quiz) => quiz.noteKeywords.some((keyword) => {
                       return subtopic.title.toLowerCase().includes(keyword);
-                    }))
+                    })),
+                    ...(Array.isArray(subtopic.quizzes) ? subtopic.quizzes : [])
+                  ]
                     .map((quiz) => {
                       const quizId = `${subtopic.id}-${quiz.id}`;
-                      const isExpanded = expandedQuizId === quizId;
+                      const isActive = activeQuizId === quizId;
                       return (
                         <div
                           key={quizId}
-                          className="ml-8 rounded-lg border-l border-indigo-400/25 py-1 pl-3"
+                          className={`ml-8 rounded-lg border-l py-1 pl-3 ${
+                            isActive ? 'border-indigo-400' : 'border-indigo-400/25'
+                          }`}
                         >
                           <button
                             type="button"
-                            aria-expanded={isExpanded}
-                            onClick={() => setExpandedQuizId(isExpanded ? null : quizId)}
-                            className="flex w-full items-center gap-2 text-left"
+                            aria-current={isActive ? 'page' : undefined}
+                            onClick={() => onSelectQuiz(quiz, subtopic)}
+                            className={`flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition ${
+                              isActive ? 'bg-indigo-500/10' : 'hover:bg-white/[0.04]'
+                            }`}
                           >
                             <FileQuestion size={13} className="shrink-0 text-indigo-300" />
                             <span className="min-w-0 flex-1">
@@ -349,29 +468,12 @@ export default function NoteEditorSidebar({
                                 {quiz.title}
                               </span>
                               <span className="mt-0.5 block text-[9px] text-[#777783]">
-                                {quiz.questionCount} questions · {quiz.duration} · sample
+                                {quiz.questions?.length || quiz.questionCount} questions
+                                {quiz.duration ? ` · ${quiz.duration}` : ''}
+                                {quiz.generated ? ' · AI generated' : ' · sample'}
                               </span>
                             </span>
-                            <ChevronDown
-                              size={12}
-                              className={`shrink-0 text-[#777783] transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                            />
                           </button>
-                          {isExpanded && (
-                            <div className="mt-2 space-y-1.5 pr-1">
-                              <p className="text-[10px] leading-4 text-[#c4c4cc]">
-                                {quiz.sampleQuestion}
-                              </p>
-                              {quiz.choices.map((choice) => (
-                                <div
-                                  key={choice}
-                                  className="rounded-md bg-white/[0.03] px-2 py-1 text-[10px] text-[#92929e]"
-                                >
-                                  {choice}
-                                </div>
-                              ))}
-                            </div>
-                          )}
                         </div>
                       );
                     })}

@@ -39,8 +39,14 @@ class Skill(db.Model):
 
     def to_dict(self):
         subtopics_list = []
+        saved_subtopics = {
+            item.get("id"): item
+            for item in (self.subtopics or [])
+            if isinstance(item, dict) and item.get("id")
+        }
         for p in self.pages:
             note_content = p.notes[0].content if (hasattr(p, "notes") and p.notes) else ""
+            saved_subtopic = saved_subtopics.get(p.id, {})
             subtopics_list.append({
                 "id": p.id,
                 "title": p.title,
@@ -48,6 +54,7 @@ class Skill(db.Model):
                 "completed": bool(p.completed),
                 "status": p.status or "in_progress",
                 "content": note_content,
+                "quizzes": saved_subtopic.get("quizzes", []),
                 "createdAt": p.created_at,
                 "updatedAt": p.updated_at,
             })

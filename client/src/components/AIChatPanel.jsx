@@ -1,48 +1,59 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
   ChevronLeft,
   ChevronRight,
+  Coins,
   FileText,
   Plus,
   Send,
   Sparkles,
   X
 } from 'lucide-react';
+import { sanitizeNoteHtml } from '../utils/noteEditorUtils';
 
 const suggestedPrompts = [
-  'Explain this topic simply',
+  'Explain this note simply',
   'Quiz me on my notes',
-  'What should I learn next?'
+  'What are the key ideas?'
 ];
+
+const noteHtmlToText = (content) => {
+  const parsedNote = new DOMParser().parseFromString(content || '', 'text/html');
+  return parsedNote.body.innerText || parsedNote.body.textContent || '';
+};
 
 export default function AIChatPanel({
   noteTitle,
   activeNoteId,
+  noteText = '',
   notes = [],
   isOpen,
-  onToggle
+  onToggle,
+  selectedText = '',
+  isInsertionMode = false,
+  onClearSelectedText,
+  onAiRequest,
+  onApplyNoteReplacement,
+  onInsertAnswer
 }) {
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
+  const [requestError, setRequestError] = useState('');
+  const [isRequesting, setIsRequesting] = useState(false);
   const [selectedContextIds, setSelectedContextIds] = useState(
     () => activeNoteId ? [activeNoteId] : []
   );
   const [isContextPickerOpen, setIsContextPickerOpen] = useState(false);
   const conversationRef = useRef(null);
   const inputRef = useRef(null);
-  const availableNotes = Array.isArray(notes) ? notes : [];
+  const availableNotes = useMemo(
+    () => Array.isArray(notes) ? notes : [],
+    [notes]
+  );
   const selectedContextNotes = availableNotes.filter((note) => {
     return selectedContextIds.includes(note.id);
   });
-
-  useEffect(() => {
-    setSelectedContextIds((currentIds) => {
-      const availableIds = new Set(availableNotes.map((note) => note.id));
-      const validIds = currentIds.filter((id) => availableIds.has(id));
-      return validIds.length === currentIds.length ? currentIds : validIds;
-    });
-  }, [availableNotes]);
 
   useEffect(() => {
     conversationRef.current?.scrollTo({
@@ -51,28 +62,130 @@ export default function AIChatPanel({
     });
   }, [messages]);
 
-  const handleSubmit = (event) => {
-    event.preventDefault();
-    const question = message.trim();
-    if (!question) return;
+  useEffect(() => {
+    if (isOpen && (selectedText || isInsertionMode)) inputRef.current?.focus();
+  }, [isOpen, isInsertionMode, selectedText]);
 
-    const contextTitles = selectedContextNotes.map((note) => note.title);
+  const requestSelectedTextAction = async (
+    action,
+    question,
+    label,
+    scope = 'selection',
+    requestText = selectedText
+  ) => {
+    if (isRequesting) return;
+    if (!requestText && !isInsertionMode && !['note', 'context'].includes(scope)) return;
+
+    setRequestError('');
+    setIsRequesting(true);
     setMessages((currentMessages) => [
       ...currentMessages,
       {
         id: crypto.randomUUID(),
         role: 'student',
-        text: question,
-        contexts: contextTitles
-      },
-      {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        text: 'AI replies will appear here once an AI model is connected.'
+        text: label,
+        contexts: scope === 'context'
+          ? selectedContextNotes.map((note) => note.title)
+          : scope === 'note'
+            ? [noteTitle || 'Current note']
+            : [scope === 'insert' ? 'Cursor position' : 'Selected note text']
       }
     ]);
+
+    try {
+      const answer = await onAiRequest(action, question, requestText, scope);
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: answer,
+          sourceText: requestText,
+          operation: scope === 'note' ? 'replace' : 'insert',
+          formatMode: scope === 'selection' || scope === 'insert' ? 'inline' : 'blocks',
+          canInsert: action === 'ask',
+          canReplaceNote: scope === 'note'
+        }
+      ]);
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : 'The AI request failed.');
+    } finally {
+      setIsRequesting(false);
+    }
+  };
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    const question = message.trim();
+    if (!question) return;
+
+    if (selectedText || isInsertionMode) {
+      setMessage('');
+      setIsContextPickerOpen(false);
+      const action = isInsertionMode ? 'insert' : 'ask';
+      const label = isInsertionMode ? `Add at cursor: ${question}` : question;
+      const scope = isInsertionMode ? 'insert' : 'selection';
+      requestSelectedTextAction(
+        action,
+        question,
+        label,
+        scope,
+        isInsertionMode ? noteText : selectedText
+      );
+      return;
+    }
+
     setMessage('');
     setIsContextPickerOpen(false);
+    const contextText = selectedContextNotes.map((note) => {
+      const text = note.id === activeNoteId
+        ? noteText
+        : noteHtmlToText(note.content);
+      return `Note: ${note.title || 'Untitled note'}\n${text}`;
+    }).join('\n\n');
+    requestSelectedTextAction('ask', question, question, 'context', contextText);
+  };
+
+  const handleSelectedTextAction = (action) => {
+    const label = action === 'summarize'
+      ? 'Summarize selected text'
+      : action === 'edit'
+        ? 'Improve selected text'
+        : 'Make selected text concise';
+    requestSelectedTextAction(action, '', label, 'selection', selectedText);
+  };
+
+  const handleNoteAction = (action) => {
+    const labels = {
+      summarize: 'Summarize this note',
+      concise: 'Make this note more concise',
+      edit: 'Improve the writing in this note'
+    };
+    requestSelectedTextAction(action, '', labels[action], 'note', noteText);
+  };
+
+  const applyNoteReplacement = (messageId, text, sourceText) => {
+    try {
+      onApplyNoteReplacement(text, sourceText);
+      setMessages((currentMessages) => currentMessages.map((item) => (
+        item.id === messageId ? { ...item, canReplaceNote: false, applied: true } : item
+      )));
+      setRequestError('');
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : 'Could not update the note.');
+    }
+  };
+
+  const insertAnswer = (messageId, text, formatMode) => {
+    try {
+      onInsertAnswer(text, formatMode);
+      setMessages((currentMessages) => currentMessages.map((item) => (
+        item.id === messageId ? { ...item, canInsert: false, applied: true } : item
+      )));
+      setRequestError('');
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : 'Could not add the answer to the note.');
+    }
   };
 
   const toggleContext = (noteId) => {
@@ -118,6 +231,14 @@ export default function AIChatPanel({
               </span>
               <h2 className="text-sm font-semibold text-white">Assistant</h2>
             </div>
+            <div
+              aria-label="1,000 AI tokens left"
+              title="AI token balance"
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-amber-400/15 bg-amber-400/[0.06] px-2.5 py-1 text-[10px] font-medium text-amber-200"
+            >
+              <Coins size={12} />
+              <span>1,000 tokens left</span>
+            </div>
           </header>
 
           <div ref={conversationRef} className="Scroller min-h-0 flex-1 overflow-y-auto px-4 py-5">
@@ -136,12 +257,104 @@ export default function AIChatPanel({
                 <Sparkles size={14} />
               </span>
               <div className="rounded-2xl rounded-tl-md border border-white/[0.07] bg-[#1c1c23] px-3.5 py-3">
-                <p className="text-xs font-medium text-[#e4e4e7]">What are you working on?</p>
+                <p className="text-xs font-medium text-[#e4e4e7]">Working on {noteTitle || 'your notes'}?</p>
                 <p className="mt-1.5 text-xs leading-5 text-[#9999a5]">
-                  Ask for an explanation, a worked example, or a quick knowledge check.
+                  Ask about this note or a topic it does not cover, improve its writing, or add an AI answer back into it.
                 </p>
               </div>
             </div>
+
+            {noteText.trim() && !selectedText && !isInsertionMode && (
+              <div className="mb-5 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-[#92929e]">
+                  Current note actions
+                </p>
+                <div className="grid grid-cols-1 gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isRequesting}
+                    onClick={() => handleNoteAction('summarize')}
+                    className="rounded-lg border border-white/[0.08] px-2.5 py-2 text-left text-[11px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Summarize note
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isRequesting}
+                    onClick={() => handleNoteAction('edit')}
+                    className="rounded-lg border border-white/[0.08] px-2.5 py-2 text-left text-[11px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Improve writing and clarity
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isRequesting}
+                    onClick={() => handleNoteAction('concise')}
+                    className="rounded-lg border border-white/[0.08] px-2.5 py-2 text-left text-[11px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Make note more concise
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {selectedText && (
+              <div className="mb-5 rounded-xl border border-indigo-400/20 bg-indigo-500/[0.06] p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-200">
+                    Selected note text
+                  </p>
+                  <button
+                    type="button"
+                    disabled={isRequesting}
+                    onClick={onClearSelectedText}
+                    className="text-[10px] text-[#92929e] transition hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <p className="line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-[#c4c4cc]">
+                  {selectedText}
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    disabled={isRequesting}
+                    onClick={() => handleSelectedTextAction('summarize')}
+                    className="rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Summarize
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isRequesting}
+                    onClick={() => handleSelectedTextAction('concise')}
+                    className="rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Make concise
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isRequesting}
+                    onClick={() => handleSelectedTextAction('edit')}
+                    className="rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Improve
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {isInsertionMode && (
+              <div className="mb-5 rounded-xl border border-indigo-400/20 bg-indigo-500/[0.06] p-3">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-200">
+                  Insert at cursor
+                </p>
+                <p className="mt-1.5 text-xs leading-5 text-[#c4c4cc]">
+                  Describe what you want to add. The generated content will be inserted at the right-clicked position in this note.
+                </p>
+              </div>
+            )}
 
             {messages.length > 0 && (
               <div className="space-y-4">
@@ -167,16 +380,69 @@ export default function AIChatPanel({
                         )}
                       </div>
                     ) : (
-                      <p className="max-w-[85%] rounded-2xl rounded-tl-md border border-white/[0.07] bg-[#1c1c23] px-3.5 py-2.5 text-xs leading-5 text-[#9999a5]">
-                        {item.text}
-                      </p>
+                      <div className="max-w-[85%]">
+                        <div
+                          className="note-rich-editor rounded-2xl rounded-tl-md border border-white/[0.07] bg-[#1c1c23] px-3.5 py-2.5 text-xs leading-5 text-[#9999a5]"
+                          dangerouslySetInnerHTML={{ __html: sanitizeNoteHtml(item.text) }}
+                        />
+                        {item.canReplaceNote && (
+                          <div className="mt-1.5 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => applyNoteReplacement(
+                                item.id,
+                                item.text,
+                                item.sourceText || ''
+                              )}
+                              className="rounded-md bg-indigo-500/20 px-2.5 py-1.5 text-[10px] font-semibold text-indigo-200 transition hover:bg-indigo-500/30"
+                            >
+                              Apply to note
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setMessages((currentMessages) => currentMessages.map((messageItem) => (
+                                messageItem.id === item.id
+                                  ? { ...messageItem, canReplaceNote: false }
+                                  : messageItem
+                              )))}
+                              className="rounded-md px-2.5 py-1.5 text-[10px] text-[#92929e] transition hover:bg-white/[0.06] hover:text-white"
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                        )}
+                        {item.canInsert && (
+                          <button
+                            type="button"
+                            onClick={() => insertAnswer(item.id, item.text, item.formatMode)}
+                            className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-indigo-500/20 px-2.5 py-1.5 text-[10px] font-semibold text-indigo-200 transition hover:bg-indigo-500/30"
+                          >
+                            <Plus size={11} />
+                            Add to note
+                          </button>
+                        )}
+                        {item.applied && (
+                          <p className="mt-1.5 text-[10px] text-emerald-300">
+                            {item.operation === 'replace' ? 'Note updated' : 'Added to note'}
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
                 ))}
               </div>
             )}
 
-            {messages.length === 0 && (
+            {isRequesting && (
+              <p className="mt-3 text-[11px] text-indigo-200">Working…</p>
+            )}
+            {requestError && (
+              <p role="alert" className="mt-3 text-[11px] text-rose-300">
+                {requestError}
+              </p>
+            )}
+
+            {messages.length === 0 && !isInsertionMode && (
               <div className="mt-7">
                 <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#72727e]">
                   Try asking
@@ -270,15 +536,19 @@ export default function AIChatPanel({
               <textarea
                 ref={inputRef}
                 rows={2}
+                maxLength={1000}
                 value={message}
                 onChange={(event) => setMessage(event.target.value)}
+                disabled={isRequesting}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault();
                     event.currentTarget.form.requestSubmit();
                   }
                 }}
-                placeholder="Ask a question…"
+                placeholder={isInsertionMode
+                  ? 'What would you like to add here?'
+                  : selectedText ? 'Ask about the selected text…' : 'Ask a question…'}
                 aria-label="Ask the AI study assistant"
                 className="max-h-28 min-h-12 w-full resize-none bg-transparent px-1.5 py-1 text-xs leading-5 text-white outline-none placeholder:text-[#777783]"
               />
@@ -286,7 +556,7 @@ export default function AIChatPanel({
                 <span className="px-1.5 text-[10px] text-[#6f6f7a]">Enter to send · Shift + Enter for a new line</span>
                 <button
                   type="submit"
-                  disabled={!message.trim()}
+                  disabled={!message.trim() || isRequesting}
                   aria-label="Send question"
                   className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500 text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-white/[0.07] disabled:text-[#62626e]"
                 >

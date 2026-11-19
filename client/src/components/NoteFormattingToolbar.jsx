@@ -23,8 +23,7 @@ import {
   Strikethrough,
   Table2,
   Underline,
-  Undo2,
-  X
+  Undo2
 } from 'lucide-react';
 
 function ToolbarButton({ label, onClick, children, active = false, ariaExpanded }) {
@@ -82,16 +81,11 @@ export default function NoteFormattingToolbar({
   onCaptureSelection,
   isTableCellSelected,
   onRemoveTableColumn,
-  onAiRequest,
+  onOpenAiAssistant,
   toolbarRef,
   position
 }) {
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
-  const [isAiToolsOpen, setIsAiToolsOpen] = useState(false);
-  const [aiQuestion, setAiQuestion] = useState('');
-  const [aiResult, setAiResult] = useState('');
-  const [aiError, setAiError] = useState('');
-  const [isAiLoading, setIsAiLoading] = useState(false);
 
   const runMoreMenuAction = (action) => {
     action();
@@ -103,25 +97,6 @@ export default function NoteFormattingToolbar({
   const menuAlignmentClass = position.menuAlignment === 'right'
     ? 'right-0 left-auto'
     : 'left-0';
-
-  const runAiRequest = async (action) => {
-    if (action === 'ask' && !aiQuestion.trim()) {
-      setAiError('Enter a question about this line.');
-      return;
-    }
-
-    setAiError('');
-    setAiResult('');
-    setIsAiLoading(true);
-    try {
-      const answer = await onAiRequest(action, aiQuestion.trim());
-      setAiResult(answer);
-    } catch (error) {
-      setAiError(error instanceof Error ? error.message : 'The AI request failed.');
-    } finally {
-      setIsAiLoading(false);
-    }
-  };
 
   return (
     <div
@@ -159,10 +134,8 @@ export default function NoteFormattingToolbar({
               <Link2 size={14} />
             </ToolbarButton>
             <ToolbarButton
-              label="AI writing tools"
-              active={isAiToolsOpen}
-              ariaExpanded={isAiToolsOpen}
-              onClick={() => setIsAiToolsOpen((isOpen) => !isOpen)}
+              label="Use selection or cursor with assistant"
+              onClick={onOpenAiAssistant}
             >
               <Sparkles size={14} />
             </ToolbarButton>
@@ -176,87 +149,6 @@ export default function NoteFormattingToolbar({
               <MoreHorizontal size={16} />
             </ToolbarButton>
           </div>
-
-          {isAiToolsOpen && (
-            <div
-              style={{
-                maxHeight: position.menuMaxHeight,
-                width: Math.min(320, position.maxWidth)
-              }}
-              className={`absolute ${menuAlignmentClass} ${menuPlacementClass} z-40 max-w-full overflow-y-auto rounded-xl border border-white/10 bg-[#1d1d24] p-3 shadow-2xl shadow-black/50`}
-            >
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-1.5 text-xs font-medium text-[#e4e4e7]">
-                  <Sparkles size={13} className="text-indigo-300" />
-                  AI writing tools
-                </div>
-                <button
-                  type="button"
-                  aria-label="Close AI writing tools"
-                  onClick={() => setIsAiToolsOpen(false)}
-                  className="rounded p-1 text-[#92929e] hover:bg-white/[0.08] hover:text-white"
-                >
-                  <X size={13} />
-                </button>
-              </div>
-              <p className="mb-2 text-[10px] leading-4 text-[#92929e]">
-                Ask about, summarize, or rewrite the selected text or current line.
-              </p>
-              <textarea
-                value={aiQuestion}
-                onChange={(event) => setAiQuestion(event.target.value)}
-                maxLength={1000}
-                rows={2}
-                placeholder="Ask a question about this line..."
-                aria-label="Question about selected note text"
-                className="w-full resize-none rounded-lg border border-white/10 bg-[#141419] px-2.5 py-2 text-xs text-white outline-none placeholder:text-[#777783] focus:border-indigo-400/50"
-              />
-              <button
-                type="button"
-                disabled={isAiLoading || !aiQuestion.trim()}
-                onClick={() => runAiRequest('ask')}
-                className="mt-1.5 w-full rounded-lg bg-indigo-500/15 px-2.5 py-2 text-left text-xs text-indigo-200 transition hover:bg-indigo-500/25 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Ask AI about this line
-              </button>
-              <div className="mt-2 grid grid-cols-2 gap-1.5">
-                <button
-                  type="button"
-                  disabled={isAiLoading}
-                  onClick={() => runAiRequest('summarize')}
-                  className="rounded-lg border border-white/[0.08] px-2 py-2 text-[11px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Summarize
-                </button>
-                <button
-                  type="button"
-                  disabled={isAiLoading}
-                  onClick={() => runAiRequest('concise')}
-                  className="rounded-lg border border-white/[0.08] px-2 py-2 text-[11px] text-[#c4c4cc] transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Make concise
-                </button>
-              </div>
-              {isAiLoading && (
-                <p className="mt-2 text-[11px] text-indigo-200">Working…</p>
-              )}
-              {aiError && (
-                <p role="alert" className="mt-2 text-[11px] text-rose-300">
-                  {aiError}
-                </p>
-              )}
-              {aiResult && (
-                <div className="mt-2 rounded-lg border border-white/[0.07] bg-white/[0.03] p-2.5">
-                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[#777783]">
-                    AI response
-                  </p>
-                  <p className="whitespace-pre-wrap text-xs leading-5 text-[#d4d4d8]">
-                    {aiResult}
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
 
           <div className="my-1.5 h-px bg-white/[0.07]" />
 

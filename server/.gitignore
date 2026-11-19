@@ -6,3 +6,5 @@ __pycache__/
 *.pyd
 .env
 .env.local
+**/zappa_settings.json
+/server/server-prod-template-1795079720.json

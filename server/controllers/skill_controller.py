@@ -1,8 +1,28 @@
 # -*- coding: utf-8 -*-
+import json
 import time
+import uuid
 from datetime import datetime, timezone
-from flask import Blueprint, jsonify, request, session
+
+from flask import (
+    Blueprint,
+    Response,
+    current_app,
+    jsonify,
+    request,
+    session,
+    stream_with_context,
+)
+from openai import OpenAIError
+from sqlalchemy.exc import SQLAlchemyError
+
 from db.db import db
+from llm.llm import (
+    AIConfigurationError,
+    AIResponseError,
+    iter_skill_roadmap_titles,
+    open_skill_roadmap_stream,
+)
 from models.skills import Skill, Page, Note
 from models.users import User
 
@@ -319,6 +339,155 @@ def create_skill():
 
     db.session.commit()
     return jsonify({"skill": skill.to_dict()}), 201
+
+
+@skill_bp.route("/roadmap", methods=["POST"])
+def create_skill_with_roadmap():
+    user = _get_current_user()
+    if not user:
+        return jsonify({"error": "Authentication required"}), 401
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "A JSON request body is required."}), 400
+
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return jsonify({"error": "Skill name is required"}), 400
+    name = name.strip()
+    if len(name) > 255:
+        return jsonify({"error": "Skill name must be 255 characters or fewer."}), 400
+
+    description = data.get("description", "")
+    if not isinstance(description, str):
+        return jsonify({"error": "Skill goal must be text."}), 400
+    goal = description.strip() or f"Learn {name}."
+    if len(goal) > 2000:
+        return jsonify({"error": "Keep the learning goal under 2,000 characters."}), 413
+
+    skill_id = data.get("id") or f"skill_{int(time.time() * 1000)}"
+    if not isinstance(skill_id, str) or len(skill_id) > 100:
+        return jsonify({"error": "Skill ID must be 100 characters or fewer."}), 400
+    if Skill.query.filter_by(id=skill_id).first():
+        return jsonify({"error": "A skill with this ID already exists."}), 409
+
+    try:
+        roadmap_stream = open_skill_roadmap_stream(name, goal)
+    except AIConfigurationError as error:
+        return jsonify({"error": str(error)}), 503
+    except OpenAIError:
+        current_app.logger.exception("Could not start skill roadmap generation")
+        return jsonify({"error": "The AI service request failed. Please try again."}), 502
+
+    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    skill = Skill(
+        id=skill_id,
+        user_id=user.id,
+        name=name,
+        category=data.get("category") or "Computer Science",
+        description=description.strip(),
+        color=data.get("color") or "indigo",
+        icon=data.get("icon") or "Terminal",
+        progress_mode="auto",
+        manual_progress=0,
+        target_date=data.get("targetDate") or "",
+        subtopics=[],
+        created_at=data.get("createdAt") or now_date,
+        updated_at="Just now",
+    )
+    user_id = user.id
+    db.session.add(skill)
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        roadmap_stream.close()
+        current_app.logger.exception("Could not save skill before roadmap generation")
+        return jsonify({"error": "Could not save the skill workspace."}), 500
+
+    skill_payload = skill.to_dict()
+
+    def generate_events():
+        yield f"data: {json.dumps({'type': 'skill', 'skill': skill_payload})}\n\n"
+        modules = []
+        try:
+            for index, title in enumerate(iter_skill_roadmap_titles(roadmap_stream)):
+                if index >= 64:
+                    break
+
+                page_id = f"page_{uuid.uuid4().hex}"
+                topic = {
+                    "id": page_id,
+                    "title": title,
+                    "emoji": "📘",
+                    "completed": False,
+                    "status": "not_started",
+                    "content": "",
+                    "createdAt": now_date,
+                    "updatedAt": "Just now",
+                }
+                page = Page(
+                    id=page_id,
+                    skill_id=skill_id,
+                    user_id=user_id,
+                    title=title,
+                    emoji=topic["emoji"],
+                    completed=False,
+                    status="not_started",
+                    order_index=index,
+                    created_at=now_date,
+                    updated_at="Just now",
+                )
+                note = Note(
+                    id=f"note_{page_id}",
+                    user_id=user_id,
+                    skill_id=skill_id,
+                    page_id=page_id,
+                    content="",
+                    created_at=now_date,
+                    updated_at="Just now",
+                )
+                db.session.add_all([page, note])
+                modules.append(topic)
+                updated_rows = (
+                    Skill.query.filter_by(id=skill_id, user_id=user_id).update(
+                        {"subtopics": list(modules), "updated_at": "Just now"},
+                        synchronize_session=False,
+                    )
+                )
+                if updated_rows != 1:
+                    db.session.rollback()
+                    current_app.logger.error(
+                        "Skill %s disappeared during roadmap generation", skill_id
+                    )
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'The skill workspace could not be updated.'})}\n\n"
+                    return
+                db.session.commit()
+                yield f"data: {json.dumps({'type': 'module', 'module': topic})}\n\n"
+
+            yield f"data: {json.dumps({'type': 'done', 'count': len(modules)})}\n\n"
+        except AIResponseError as error:
+            db.session.rollback()
+            current_app.logger.warning("Skill roadmap generation failed: %s", error)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(error)})}\n\n"
+        except OpenAIError:
+            db.session.rollback()
+            current_app.logger.exception("Skill roadmap generation request failed")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'The AI service request failed. Please try again.'})}\n\n"
+        except SQLAlchemyError:
+            db.session.rollback()
+            current_app.logger.exception("Could not save a generated roadmap module")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Could not save a roadmap module.'})}\n\n"
+        finally:
+            roadmap_stream.close()
+
+    response = Response(
+        stream_with_context(generate_events()),
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response, 200
 
 
 @skill_bp.route("/<string:skill_id>", methods=["PUT"])

@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { apiFetch } from '../utils/api';
 
 const AuthContext = createContext(null);
 
@@ -15,7 +16,7 @@ export function AuthProvider({ children }) {
     let isMounted = true;
     async function checkSession() {
       try {
-        const res = await fetch('/api/auth/me', {
+        const res = await apiFetch('/api/auth/me', {
           method: 'GET',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -49,7 +50,7 @@ export function AuthProvider({ children }) {
         throw new Error('Please enter your email and password.');
       }
 
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -86,7 +87,7 @@ export function AuthProvider({ children }) {
         throw new Error('Passwords do not match.');
       }
 
-      const res = await fetch('/api/auth/register', {
+      const res = await apiFetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -117,7 +118,7 @@ export function AuthProvider({ children }) {
         throw new Error('Please enter your email address.');
       }
 
-      const res = await fetch('/api/auth/forgot-password', {
+      const res = await apiFetch('/api/auth/forgot-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -143,7 +144,7 @@ export function AuthProvider({ children }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/auth/verify-reset-code', {
+      const res = await apiFetch('/api/auth/verify-reset-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -176,7 +177,7 @@ export function AuthProvider({ children }) {
         throw new Error('Password must be at least 6 characters.');
       }
 
-      const res = await fetch('/api/auth/reset-password', {
+      const res = await apiFetch('/api/auth/reset-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -206,7 +207,7 @@ export function AuthProvider({ children }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/auth/google', {
+      const res = await apiFetch('/api/auth/google', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -234,7 +235,7 @@ export function AuthProvider({ children }) {
   // Logout connected to backend
   const logout = useCallback(async () => {
     try {
-      await fetch('/api/auth/logout', {
+      await apiFetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'include',
       });

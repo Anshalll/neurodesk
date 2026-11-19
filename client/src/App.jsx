@@ -10,6 +10,7 @@ import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import UserProfilePage from './pages/UserProfilePage';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { calculateSkillProgress } from './utils/helpers';
+import { apiFetch } from './utils/api';
 
 const HomePage = lazy(() => import('./pages/HomePage'));
 const PricingPage = lazy(() => import('./pages/PricingPage'));
@@ -62,7 +63,7 @@ function AppContent() {
 
     async function fetchSkillsFromBackend() {
       try {
-        const res = await fetch('/api/skills', {
+        const res = await apiFetch('/api/skills', {
           method: 'GET',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -93,29 +94,74 @@ function AppContent() {
     ? Math.round(skills.reduce((acc, s) => acc + calculateSkillProgress(s), 0) / skills.length)
     : 0;
 
-  const handleCreateSkill = async (newSkill) => {
-    // 1. Optimistic update
-    const updated = [newSkill, ...skills];
-    setSkills(updated);
-    navigate(`/workspace/${newSkill.id}`);
-
-    // 2. Persist to MySQL
-    try {
-      const res = await fetch('/api/skills', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(newSkill),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.skill) {
-          setSkills((prev) => prev.map((s) => (s.id === newSkill.id ? data.skill : s)));
-        }
-      }
-    } catch (err) {
-      console.error('Failed to save skill to MySQL:', err);
+  const handleCreateSkill = async (newSkill, onRoadmapModule) => {
+    const res = await apiFetch('/api/skills/roadmap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(newSkill),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || `Roadmap request failed (status ${res.status}).`);
     }
+    if (!res.body) {
+      throw new Error('The server did not start the roadmap stream.');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let roadmapComplete = false;
+    let skillCreated = false;
+    const handleEvent = (record) => {
+      const payload = record
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n');
+      if (!payload) return;
+
+      const event = JSON.parse(payload);
+      if (event.type === 'skill' && event.skill) {
+        skillCreated = true;
+        setSkills((prev) => [event.skill, ...prev.filter((skill) => skill.id !== event.skill.id)]);
+      } else if (event.type === 'module' && event.module) {
+        setSkills((prev) => prev.map((skill) => (
+          skill.id === newSkill.id
+            ? { ...skill, subtopics: [...(skill.subtopics || []), event.module] }
+            : skill
+        )));
+        onRoadmapModule(event.module);
+      } else if (event.type === 'error') {
+        throw new Error(event.message || 'Roadmap generation failed.');
+      } else if (event.type === 'done') {
+        roadmapComplete = true;
+      }
+    };
+
+    try {
+      let streamEnded = false;
+      while (!streamEnded) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const records = buffer.split(/\r?\n\r?\n/);
+        buffer = records.pop() || '';
+        records.forEach(handleEvent);
+        streamEnded = done;
+      }
+      if (buffer.trim()) handleEvent(buffer);
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (!skillCreated) {
+      throw new Error('The server did not create the skill workspace.');
+    }
+    if (!roadmapComplete) {
+      throw new Error('The roadmap stream ended before generation completed.');
+    }
+    navigate(`/workspace/${newSkill.id}`);
   };
 
   const handleUpdateSkill = (skillId, updatedSkill) => {
@@ -129,7 +175,7 @@ function AppContent() {
 
     debounceTimers.current[skillId] = setTimeout(async () => {
       try {
-        await fetch(`/api/skills/${encodeURIComponent(skillId)}`, {
+        await apiFetch(`/api/skills/${encodeURIComponent(skillId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -146,7 +192,7 @@ function AppContent() {
       setSkills((prev) => prev.filter((s) => s.id !== skillId));
 
       try {
-        await fetch(`/api/skills/${encodeURIComponent(skillId)}`, {
+        await apiFetch(`/api/skills/${encodeURIComponent(skillId)}`, {
           method: 'DELETE',
           credentials: 'include',
         });
@@ -159,7 +205,7 @@ function AppContent() {
   const handleResetDemoData = async () => {
     if (window.confirm('Reset all workspaces to default demo data?')) {
       try {
-        const res = await fetch('/api/skills/reset', {
+        const res = await apiFetch('/api/skills/reset', {
           method: 'POST',
           credentials: 'include',
         });

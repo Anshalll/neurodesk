@@ -8,6 +8,7 @@ import React, {
 } from 'react';
 import { FileText } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { apiFetch } from '../utils/api';
 import {
   escapeHtml,
   renderLatexMath,
@@ -16,6 +17,7 @@ import {
 } from '../utils/noteEditorUtils';
 import AIChatPanel from './AIChatPanel';
 import NoteDocument from './NoteDocument';
+import QuizDocument from './QuizDocument';
 import NoteEditorDialogs from './NoteEditorDialogs';
 import NoteEditorHeader from './NoteEditorHeader';
 import NoteEditorSidebar from './NoteEditorSidebar';
@@ -33,6 +35,11 @@ export default function NoteEditor({
   const { skillId } = useParams();
 
   const skill = skills.find((item) => item.id === skillId) || skills[0] || null;
+  const skillRef = useRef(skill);
+
+  useEffect(() => {
+    skillRef.current = skill;
+  }, [skill]);
 
   useEffect(() => {
     if (!skillsLoading && !skill) {
@@ -45,9 +52,12 @@ export default function NoteEditor({
   const [activeSubtopicId, setActiveSubtopicId] = useState(
     firstSubtopic ? firstSubtopic.id : null
   );
+  const [selectedQuiz, setSelectedQuiz] = useState(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [subtopicSearch, setSubtopicSearch] = useState('');
   const [isAiChatOpen, setIsAiChatOpen] = useState(true);
+  const [aiSelectedText, setAiSelectedText] = useState('');
+  const [aiMode, setAiMode] = useState('selection');
 
   // Save and editor status
   const [copyFeedback, setCopyFeedback] = useState(false);
@@ -85,6 +95,7 @@ export default function NoteEditor({
   const loadedEditorNoteId = useRef(null);
   const sidebarResizeRef = useRef(null);
   const savedRangeRef = useRef(null);
+  const aiRangeRef = useRef(null);
   const existingLinkRef = useRef(null);
 
   // Sidebar resizing
@@ -140,6 +151,29 @@ export default function NoteEditor({
     skill?.subtopics?.find((subtopic) => subtopic.id === activeSubtopicId) ||
     skill?.subtopics?.[0] ||
     null;
+  const activeQuizId = selectedQuiz
+    ? `${selectedQuiz.noteId}-${selectedQuiz.quiz.id}`
+    : null;
+
+  const clearAiSelectionContext = () => {
+    aiRangeRef.current = null;
+    savedRangeRef.current = null;
+    existingLinkRef.current = null;
+    setAiSelectedText('');
+    setAiMode('selection');
+  };
+
+  const handleSelectSubtopic = (subtopicId) => {
+    clearAiSelectionContext();
+    setActiveSubtopicId(subtopicId);
+    setSelectedQuiz(null);
+  };
+
+  const handleSelectQuiz = (quiz, subtopic) => {
+    clearAiSelectionContext();
+    setActiveSubtopicId(subtopic.id);
+    setSelectedQuiz({ noteId: subtopic.id, quiz });
+  };
 
   const activeNoteContent = typeof activeSubtopic?.content === 'string'
     ? activeSubtopic.content
@@ -391,7 +425,52 @@ export default function NoteEditor({
     event.preventDefault();
     formattingToolbarDismissedRef.current = false;
     clearSelectionToolbarTimeout();
-    captureEditorSelection();
+
+    const editor = editorRef.current;
+    const selection = window.getSelection();
+    const hasEditorTextSelection = selection?.rangeCount
+      && !selection.isCollapsed
+      && editor?.contains(selection.anchorNode)
+      && editor.contains(selection.focusNode);
+
+    if (!hasEditorTextSelection && editor) {
+      let contextRange = null;
+      if (document.caretPositionFromPoint) {
+        const caretPosition = document.caretPositionFromPoint(event.clientX, event.clientY);
+        if (caretPosition) {
+          contextRange = document.createRange();
+          contextRange.setStart(caretPosition.offsetNode, caretPosition.offset);
+          contextRange.collapse(true);
+        }
+      } else if (document.caretRangeFromPoint) {
+        contextRange = document.caretRangeFromPoint(event.clientX, event.clientY);
+      }
+
+      if (!contextRange || !editor.contains(contextRange.startContainer)) {
+        const target = event.target.nodeType === Node.ELEMENT_NODE
+          ? event.target
+          : event.target.parentElement;
+        const targetBlock = target?.closest('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, td, th')
+          || target;
+        if (targetBlock && editor.contains(targetBlock)) {
+          contextRange = document.createRange();
+          contextRange.selectNodeContents(targetBlock);
+          contextRange.collapse(false);
+        }
+      }
+
+      if (contextRange && editor.contains(contextRange.startContainer)) {
+        selection?.removeAllRanges();
+        selection?.addRange(contextRange);
+        savedRangeRef.current = contextRange.cloneRange();
+        existingLinkRef.current = null;
+      } else {
+        captureEditorSelection();
+      }
+    } else {
+      captureEditorSelection();
+    }
+
     updateSelectedTableState();
     showFormattingToolbar({
       type: 'point',
@@ -463,23 +542,95 @@ export default function NoteEditor({
     return null;
   };
 
-  const handleAiRequest = async (action, question) => {
+  const getAiInsertionContext = (range) => {
     const editor = editorRef.current;
-    const range = getAiTextRange();
-    if (!editor || !range) {
-      throw new Error('Select text or place the cursor on a line first.');
+    if (!editor || !range || !editor.contains(range.startContainer)) return '';
+
+    const startNode = range.startContainer;
+    const startElement = startNode.nodeType === Node.ELEMENT_NODE
+      ? startNode
+      : startNode.parentElement;
+    const block = startElement?.closest(
+      'p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, td, th, div'
+    );
+    if (!block || block === editor || !editor.contains(block)) return '';
+
+    return [
+      block.previousElementSibling?.textContent,
+      block.textContent,
+      block.nextElementSibling?.textContent
+    ]
+      .map((text) => text?.trim())
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 8000);
+  };
+
+  const handleOpenAiAssistant = () => {
+    const range = savedRangeRef.current?.cloneRange() || null;
+    const selectedText = range && !range.collapsed ? range.toString().trim() : '';
+    if (!selectedText && range && !range.collapsed) range.collapse(false);
+    aiRangeRef.current = range;
+    setAiSelectedText(selectedText);
+    setAiMode(selectedText ? 'selection' : 'insert');
+    setIsAiChatOpen(true);
+  };
+
+  const insertAiContentAtRange = (content, range) => {
+    if (!editorRef.current || !range || !editorRef.current.contains(range.startContainer)) {
+      throw new Error('The note insertion point is no longer available.');
     }
 
-    const sourceText = range.toString().trim();
-    const response = await fetch('/api/ai/note-assistant', {
+    const template = document.createElement('template');
+    template.innerHTML = sanitizeNoteHtml(content);
+    const fragment = template.content;
+    const insertedNodes = [...fragment.childNodes];
+    if (insertedNodes.length === 0) {
+      throw new Error('The AI response did not contain usable note content.');
+    }
+
+    range.deleteContents();
+    range.insertNode(fragment);
+
+    const caretRange = document.createRange();
+    caretRange.setStartAfter(insertedNodes[insertedNodes.length - 1]);
+    caretRange.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(caretRange);
+    savedRangeRef.current = caretRange.cloneRange();
+    handleEditorInput();
+  };
+
+  const handleAiRequest = async (action, question, requestedText, scope = 'selection') => {
+    const editor = editorRef.current;
+    const isInsertAction = action === 'insert';
+    let range = aiRangeRef.current?.cloneRange() || getAiTextRange();
+    if (scope === 'note' && editor) {
+      range = document.createRange();
+      range.selectNodeContents(editor);
+    }
+    const sourceText = scope === 'context'
+      ? requestedText?.trim() || ''
+      : requestedText?.trim() || range?.toString().trim() || '';
+    const insertionContext = isInsertAction ? getAiInsertionContext(range) : '';
+    if (['summarize', 'concise', 'edit'].includes(action) && !sourceText) {
+      throw new Error('Select text or place the cursor on a line first.');
+    }
+    if (isInsertAction && (!editor || !range || !editor.contains(range.startContainer))) {
+      throw new Error('The insertion point is no longer available. Right-click the note where you want to add content and try again.');
+    }
+
+    const response = await apiFetch('/api/ai/note-assistant', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({
         action,
-        text: sourceText,
+        text: isInsertAction ? sourceText || insertionContext : sourceText,
         question,
-        noteTitle: activeSubtopic?.title || ''
+        noteTitle: activeSubtopic?.title || '',
+        format: scope === 'selection' || scope === 'insert' ? 'inline' : 'blocks'
       })
     });
 
@@ -498,40 +649,50 @@ export default function NoteEditor({
     }
 
     const answer = responseData.answer.trim();
-    if (action === 'ask') return answer;
+    if (action === 'ask' || scope === 'note') return answer;
 
-    if (!editor.contains(range.startContainer) || range.toString().trim() !== sourceText) {
+    if (!editor || !range
+      || !editor.contains(range.startContainer)
+      || (isInsertAction ? !range.collapsed : range.toString().trim() !== sourceText)) {
       throw new Error('The note changed while AI was working. Please try again.');
     }
 
-    range.deleteContents();
-    const fragment = document.createDocumentFragment();
-    const insertedNodes = [];
-    answer.replace(/\r\n/g, '\n').split('\n').forEach((line, index) => {
-      if (index > 0) {
-        const lineBreak = document.createElement('br');
-        fragment.appendChild(lineBreak);
-        insertedNodes.push(lineBreak);
-      }
-
-      const textNode = document.createTextNode(line);
-      fragment.appendChild(textNode);
-      insertedNodes.push(textNode);
-    });
-    range.insertNode(fragment);
-
-    const caretRange = document.createRange();
-    caretRange.setStartAfter(insertedNodes[insertedNodes.length - 1]);
-    caretRange.collapse(true);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(caretRange);
-    savedRangeRef.current = caretRange.cloneRange();
-    handleEditorInput();
+    insertAiContentAtRange(answer, range);
+    aiRangeRef.current = null;
+    setAiSelectedText('');
+    setAiMode('selection');
 
     return answer;
   };
 
+  const handleApplyAiNoteReplacement = (text, expectedText) => {
+    const editor = editorRef.current;
+    if (!editor) throw new Error('The note editor is not available.');
+
+    const currentText = editor.innerText || editor.textContent || '';
+    if (currentText.trim() !== expectedText.trim()) {
+      throw new Error('The note changed while AI was working. Generate the edit again.');
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    insertAiContentAtRange(text, range);
+  };
+
+  const handleInsertAiAnswer = (text, formatMode) => {
+    const editor = editorRef.current;
+    if (!editor) throw new Error('The note editor is not available.');
+
+    const range = document.createRange();
+    range.setStart(editor, editor.childNodes.length);
+    range.collapse(true);
+    editor.focus();
+    const content = formatMode === 'inline' ? `<p>${text}</p>` : text;
+    insertAiContentAtRange(content, range);
+    aiRangeRef.current = null;
+    setAiSelectedText('');
+    setAiMode('selection');
+  };
   useEffect(() => {
     const handlePointerDown = (event) => {
       const clickedEditor = editorRef.current?.contains(event.target);
@@ -936,6 +1097,7 @@ export default function NoteEditor({
     const updated = [...(skill.subtopics || []), newNote];
     updateSkillNotes(updated);
     setActiveSubtopicId(newNoteId);
+    setSelectedQuiz(null);
   };
 
   const handleDeleteNote = (subtopicId, event) => {
@@ -951,6 +1113,7 @@ export default function NoteEditor({
     if (activeSubtopicId === subtopicId) {
       const nextNoteId = updatedSubtopics.length > 0 ? updatedSubtopics[0].id : null;
       setActiveSubtopicId(nextNoteId);
+      setSelectedQuiz(null);
     }
   };
 
@@ -973,6 +1136,7 @@ export default function NoteEditor({
 
     updateSkillNotes(updatedSubtopics);
     setActiveSubtopicId(duplicateNote.id);
+    setSelectedQuiz(null);
   };
 
   const handleRenameNote = (subtopicId, requestedTitle) => {
@@ -984,6 +1148,69 @@ export default function NoteEditor({
     ));
 
     updateSkillNotes(updatedSubtopics);
+  };
+
+  const handleGenerateQuiz = async (note) => {
+    const sanitizedContent = sanitizeNoteHtml(note.content || '');
+    const parsedNote = new DOMParser().parseFromString(sanitizedContent, 'text/html');
+    const noteText = parsedNote.body.innerText || parsedNote.body.textContent || '';
+    if (!noteText.trim()) {
+      throw new Error('Add content to this note before generating a quiz.');
+    }
+
+    const response = await apiFetch('/api/ai/generate-quiz', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        noteTitle: note.title || '',
+        text: noteText
+      })
+    });
+
+    let responseData;
+    try {
+      responseData = await response.json();
+    } catch {
+      throw new Error('The AI service returned an invalid response.');
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        responseData && typeof responseData.error === 'string'
+          ? responseData.error
+          : 'Could not generate a quiz.'
+      );
+    }
+
+    const quiz = responseData && typeof responseData === 'object'
+      ? responseData.quiz
+      : null;
+    if (!quiz || typeof quiz.id !== 'string'
+      || typeof quiz.title !== 'string' || !Array.isArray(quiz.questions)) {
+      throw new Error('The AI service returned an invalid quiz.');
+    }
+
+    const currentSkill = skillRef.current;
+    const updatedSubtopics = (currentSkill?.subtopics || []).map((subtopic) => {
+      if (subtopic.id !== note.id) return subtopic;
+      return {
+        ...subtopic,
+        quizzes: [...(Array.isArray(subtopic.quizzes) ? subtopic.quizzes : []), quiz],
+        updatedAt: 'Just now'
+      };
+    });
+    if (!updatedSubtopics.some((subtopic) => subtopic.id === note.id)) {
+      throw new Error('This note no longer exists.');
+    }
+
+    onUpdateSkill(currentSkill.id, {
+      ...currentSkill,
+      updatedAt: 'Just now',
+      subtopics: updatedSubtopics
+    });
+    setActiveSubtopicId(note.id);
+    setSelectedQuiz({ noteId: note.id, quiz });
   };
 
   const handleMoveNote = (subtopicId, direction) => {
@@ -1088,11 +1315,14 @@ export default function NoteEditor({
           subtopicSearch={subtopicSearch}
           onSearchChange={setSubtopicSearch}
           onAddNote={handleAddNote}
-          onSelectSubtopic={setActiveSubtopicId}
+          onSelectSubtopic={handleSelectSubtopic}
+          activeQuizId={activeQuizId}
+          onSelectQuiz={handleSelectQuiz}
           onDeleteNote={handleDeleteNote}
           onDuplicateNote={handleDuplicateNote}
           onRenameNote={handleRenameNote}
           onDownloadNote={handleDownloadNote}
+          onGenerateQuiz={handleGenerateQuiz}
           onMoveNote={handleMoveNote}
           onReorderNotes={handleReorderNotes}
           sidebarWidth={sidebarWidth}
@@ -1109,8 +1339,16 @@ export default function NoteEditor({
           className="Scroller flex min-w-0 flex-1 flex-col overflow-hidden bg-[#101014]"
         >
           {activeSubtopic ? (
-            <div className="flex min-h-0 flex-1 flex-col">
-              {isFormattingToolbarVisible && <NoteFormattingToolbar
+            selectedQuiz ? (
+              <QuizDocument
+                key={activeQuizId}
+                skill={skill}
+                quiz={selectedQuiz.quiz}
+                onBack={() => setSelectedQuiz(null)}
+              />
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col">
+                {isFormattingToolbarVisible && <NoteFormattingToolbar
                 activeFormat={activeFormat}
                 runEditorCommand={runToolbarEditorCommand}
                 insertHtml={insertHtml}
@@ -1129,26 +1367,27 @@ export default function NoteEditor({
                 onCaptureSelection={captureEditorSelection}
                 isTableCellSelected={isTableCellSelected}
                 onRemoveTableColumn={removeSelectedTableColumn}
-                onAiRequest={handleAiRequest}
+                onOpenAiAssistant={handleOpenAiAssistant}
                 toolbarRef={formattingToolbarRef}
                 position={formattingToolbarPosition}
-              />}
-              <NoteDocument
-                skill={skill}
-                activeSubtopic={activeSubtopic}
-                stats={stats}
-                editorRef={editorRef}
-                onTitleChange={updateActiveNote}
-                onInput={handleEditorInput}
-                onCursorUpdate={updateCursorPos}
-                onSelectionChange={() => handleEditorSelectionChange(true)}
-                onContextMenu={handleEditorContextMenu}
-                onAddTableColumn={addTableColumn}
-                onAddTableRow={addTableRow}
-                onPaste={handlePaste}
-                onKeyDown={handleEditorKeyDown}
-              />
-            </div>
+                />}
+                <NoteDocument
+                  skill={skill}
+                  activeSubtopic={activeSubtopic}
+                  stats={stats}
+                  editorRef={editorRef}
+                  onTitleChange={updateActiveNote}
+                  onInput={handleEditorInput}
+                  onCursorUpdate={updateCursorPos}
+                  onSelectionChange={() => handleEditorSelectionChange(true)}
+                  onContextMenu={handleEditorContextMenu}
+                  onAddTableColumn={addTableColumn}
+                  onAddTableRow={addTableRow}
+                  onPaste={handlePaste}
+                  onKeyDown={handleEditorKeyDown}
+                />
+              </div>
+            )
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-center p-8 text-[#71717a]">
               <FileText className="w-12 h-12 text-[#3f3f46] mb-3" />
@@ -1163,10 +1402,22 @@ export default function NoteEditor({
           )}
         </main>
         <AIChatPanel
+          key={activeSubtopic?.id || 'no-active-note'}
           noteTitle={activeSubtopic?.title}
           activeNoteId={activeSubtopic?.id}
+          noteText={plainText}
           notes={skill.subtopics || []}
           isOpen={isAiChatOpen}
+          selectedText={aiSelectedText}
+          isInsertionMode={aiMode === 'insert'}
+          onClearSelectedText={() => {
+            aiRangeRef.current = null;
+            setAiSelectedText('');
+            setAiMode('selection');
+          }}
+          onAiRequest={handleAiRequest}
+          onApplyNoteReplacement={handleApplyAiNoteReplacement}
+          onInsertAnswer={handleInsertAiAnswer}
           onToggle={() => setIsAiChatOpen((open) => !open)}
         />
       </div>
