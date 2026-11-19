@@ -1,37 +1,53 @@
 import secrets
 from functools import wraps
-from flask import g, session, jsonify
+import jwt
+from flask import current_app, g, request, jsonify
 
-from Errors.app_errors import UserNotFound
 from db.db import db
 from models.users import AuthCredential, User
 
 
-def is_user_authenticated():
-    user_id = session.get("user_id")
-    user = db.session.get(User, user_id) if user_id else None
-    credential = (
-        AuthCredential.query.filter_by(user_id=user.id).first() if user else None
-    )
+def get_authenticated_user():
+    token = request.cookies.get(current_app.config["JWT_COOKIE_NAME"])
+    if not token:
+        return None
+
+    try:
+        payload = jwt.decode(
+            token,
+            current_app.config["JWT_SECRET_KEY"],
+            algorithms=["HS256"],
+            options={"require": ["exp", "iat", "sub", "ver"]},
+        )
+        user_id = int(payload["sub"])
+        token_version = payload["ver"]
+        if not isinstance(token_version, str):
+            return None
+    except (jwt.InvalidTokenError, TypeError, ValueError):
+        return None
+
+    user = db.session.get(User, user_id)
+    if not user:
+        return None
+    credential = AuthCredential.query.filter_by(user_id=user.id).first()
     if (
-        not user
-        or not credential
+        not credential
         or not credential.email_verified
         or not secrets.compare_digest(
-            credential.session_version or "", session.get("session_version", "")
+            credential.token_version or "", token_version
         )
     ):
-        raise UserNotFound("Authentication required.")
+        return None
+
     g.current_user = user
-    return {"user": user.email, "id": user.id}
+    return user
 
 
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        try:
-            is_user_authenticated()
-        except UserNotFound as e:
-            return jsonify({"error": str(e)}), 401
+        if not get_authenticated_user():
+            return jsonify({"error": "Authentication required."}), 401
         return f(*args, **kwargs)
+
     return decorated_function

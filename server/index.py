@@ -30,13 +30,27 @@ def create_app():
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-    # Session configuration
-    app.secret_key = os.getenv(
-        "FLASK_SECRET_KEY", "neurodesk-dev-secret-key-9999"
+    jwt_secret_key = os.getenv("JWT_SECRET_KEY")
+    if not jwt_secret_key:
+        raise RuntimeError("JWT_SECRET_KEY must be configured.")
+    app.config["JWT_SECRET_KEY"] = jwt_secret_key
+    app.config["JWT_ACCESS_TOKEN_SECONDS"] = int(
+        os.getenv("JWT_ACCESS_TOKEN_SECONDS", "2592000")
     )
-    app.config["SESSION_COOKIE_HTTPONLY"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-    app.config["SESSION_COOKIE_SECURE"] = False
+    if app.config["JWT_ACCESS_TOKEN_SECONDS"] <= 0:
+        raise ValueError("JWT_ACCESS_TOKEN_SECONDS must be greater than zero.")
+    app.config["JWT_COOKIE_NAME"] = "access_token"
+    app.config["JWT_COOKIE_SECURE"] = os.getenv(
+        "JWT_COOKIE_SECURE", "false"
+    ).lower() in {"1", "true", "yes"}
+    app.config["JWT_COOKIE_SAMESITE"] = os.getenv("JWT_COOKIE_SAMESITE", "Lax")
+    if app.config["JWT_COOKIE_SAMESITE"] not in {"Lax", "Strict", "None"}:
+        raise ValueError("JWT_COOKIE_SAMESITE must be Lax, Strict, or None.")
+    if (
+        app.config["JWT_COOKIE_SAMESITE"] == "None"
+        and not app.config["JWT_COOKIE_SECURE"]
+    ):
+        raise ValueError("JWT_COOKIE_SECURE must be true when SameSite is None.")
 
     # CORS configuration
     import re

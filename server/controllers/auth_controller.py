@@ -2,7 +2,9 @@ import hashlib
 import re
 import secrets
 import time
-from flask import Blueprint, jsonify, request, session
+from datetime import datetime, timedelta, timezone
+import jwt
+from flask import Blueprint, current_app, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from Errors.app_errors import (
@@ -13,6 +15,7 @@ from Errors.app_errors import (
     ValidationError,
 )
 from db.db import db
+from middleware.isuserauthenticated import get_authenticated_user
 from models.users import AuthCredential, User
 from services.email_service import send_otp_email
 
@@ -21,6 +24,44 @@ auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
 def _is_valid_email(email: str) -> bool:
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email or ""))
+
+
+def _set_auth_cookie(response, user, credential):
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(
+        seconds=current_app.config["JWT_ACCESS_TOKEN_SECONDS"]
+    )
+    token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "ver": credential.token_version,
+            "iat": now,
+            "exp": expires_at,
+        },
+        current_app.config["JWT_SECRET_KEY"],
+        algorithm="HS256",
+    )
+    response.set_cookie(
+        current_app.config["JWT_COOKIE_NAME"],
+        token,
+        max_age=current_app.config["JWT_ACCESS_TOKEN_SECONDS"],
+        httponly=True,
+        secure=current_app.config["JWT_COOKIE_SECURE"],
+        samesite=current_app.config["JWT_COOKIE_SAMESITE"],
+        path="/",
+    )
+    return response
+
+
+def _clear_auth_cookie(response):
+    response.delete_cookie(
+        current_app.config["JWT_COOKIE_NAME"],
+        path="/",
+        httponly=True,
+        secure=current_app.config["JWT_COOKIE_SECURE"],
+        samesite=current_app.config["JWT_COOKIE_SAMESITE"],
+    )
+    return response
 
 
 @auth_bp.route("/register", methods=["POST"])
@@ -50,7 +91,7 @@ def register():
             409,
         )
 
-    session_ver = secrets.token_hex(16)
+    token_version = secrets.token_hex(16)
     new_user = User(name=name, email=email)
     db.session.add(new_user)
     db.session.flush()
@@ -59,25 +100,18 @@ def register():
         user_id=new_user.id,
         password_hash=generate_password_hash(password),
         email_verified=True,
-        session_version=session_ver,
+        token_version=token_version,
     )
     db.session.add(credential)
     db.session.commit()
 
-    # Log user in
-    session["user_id"] = new_user.id
-    session["session_version"] = session_ver
-    session.permanent = True
-
-    return (
-        jsonify(
-            {
-                "message": "Account created successfully.",
-                "user": new_user.to_dict(),
-            }
-        ),
-        201,
+    response = jsonify(
+        {
+            "message": "Account created successfully.",
+            "user": new_user.to_dict(),
+        }
     )
+    return _set_auth_cookie(response, new_user, credential), 201
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -85,39 +119,28 @@ def login():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
-    
-
     if not email or not password:
         return jsonify({"error": "Email and password are required."}), 400
 
     user = User.query.filter_by(email=email).first()
     if not user:
-        print("user not found!")
         return jsonify({"error": "Invalid email or password."}), 401
 
     credential = AuthCredential.query.filter_by(user_id=user.id).first()
-    print(check_password_hash(credential.password_hash, password))
     if not credential or not check_password_hash(credential.password_hash, password):
         return jsonify({"error": "Invalid email or password."}), 401
 
-    # Ensure session_version exists
-    if not credential.session_version:
-        credential.session_version = secrets.token_hex(16)
+    if not credential.token_version:
+        credential.token_version = secrets.token_hex(16)
         db.session.commit()
 
-    session["user_id"] = user.id
-    session["session_version"] = credential.session_version
-    session.permanent = True
-
-    return (
-        jsonify(
-            {
-                "message": "Signed in successfully.",
-                "user": user.to_dict(),
-            }
-        ),
-        200,
+    response = jsonify(
+        {
+            "message": "Signed in successfully.",
+            "user": user.to_dict(),
+        }
     )
+    return _set_auth_cookie(response, user, credential)
 
 
 @auth_bp.route("/google", methods=["POST"])
@@ -128,7 +151,7 @@ def google_auth():
 
     user = User.query.filter_by(email=email).first()
     if not user:
-        session_ver = secrets.token_hex(16)
+        token_version = secrets.token_hex(16)
         user = User(name=name, email=email)
         db.session.add(user)
         db.session.flush()
@@ -137,7 +160,7 @@ def google_auth():
             user_id=user.id,
             password_hash=generate_password_hash(secrets.token_hex(16)),
             email_verified=True,
-            session_version=session_ver,
+            token_version=token_version,
         )
         db.session.add(credential)
         db.session.commit()
@@ -148,53 +171,36 @@ def google_auth():
                 user_id=user.id,
                 password_hash=generate_password_hash(secrets.token_hex(16)),
                 email_verified=True,
-                session_version=secrets.token_hex(16),
+                token_version=secrets.token_hex(16),
             )
             db.session.add(credential)
             db.session.commit()
 
-    session["user_id"] = user.id
-    session["session_version"] = credential.session_version or secrets.token_hex(16)
-    session.permanent = True
+    if not credential.token_version:
+        credential.token_version = secrets.token_hex(16)
+        db.session.commit()
 
-    return (
-        jsonify(
-            {
-                "message": "Signed in successfully with Google.",
-                "user": user.to_dict(),
-            }
-        ),
-        200,
+    response = jsonify(
+        {
+            "message": "Signed in successfully with Google.",
+            "user": user.to_dict(),
+        }
     )
+    return _set_auth_cookie(response, user, credential)
 
 
 @auth_bp.route("/me", methods=["GET"])
 def get_current_user():
-    user_id = session.get("user_id")
-    session_ver = session.get("session_version", "")
-
-    if not user_id:
-        return jsonify({"user": None}), 200
-
-    user = db.session.get(User, user_id)
+    user = get_authenticated_user()
     if not user:
-        session.clear()
-        return jsonify({"user": None}), 200
-
-    credential = AuthCredential.query.filter_by(user_id=user.id).first()
-    if not credential or not secrets.compare_digest(
-        credential.session_version or "", session_ver
-    ):
-        session.clear()
-        return jsonify({"user": None}), 200
-
-    return jsonify({"user": user.to_dict()}), 200
+        return _clear_auth_cookie(jsonify({"user": None}))
+    return jsonify({"user": user.to_dict()})
 
 
 @auth_bp.route("/logout", methods=["POST"])
 def logout():
-    session.clear()
-    return jsonify({"message": "Logged out successfully."}), 200
+    response = jsonify({"message": "Logged out successfully."})
+    return _clear_auth_cookie(response)
 
 
 @auth_bp.route("/forgot-password", methods=["POST"])
@@ -339,18 +345,13 @@ def reset_password():
     credential.reset_expires_at = None
     credential.reset_requested_at = None
     credential.reset_attempts = 0
-    # Invalidate old sessions
-    credential.session_version = secrets.token_hex(16)
+    # Invalidate existing JWTs.
+    credential.token_version = secrets.token_hex(16)
     db.session.commit()
 
-    # Clear current session to force fresh login with new password
-    session.clear()
-
-    return (
-        jsonify(
-            {
-                "message": "Password reset successfully! You can now log in with your new password."
-            }
-        ),
-        200,
+    response = jsonify(
+        {
+            "message": "Password reset successfully! You can now log in with your new password."
+        }
     )
+    return _clear_auth_cookie(response)

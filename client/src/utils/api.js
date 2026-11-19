@@ -6,5 +6,8 @@ if (!backendUri) {
 
 export function apiFetch(path, options) {
   const endpoint = path.startsWith('/') ? path : `/${path}`;
-  return fetch(`${backendUri}${endpoint}`, options);
+  return fetch(`${backendUri}${endpoint}`, {
+    credentials: 'include',
+    ...options,
+  });
 }

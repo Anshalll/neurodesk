@@ -10,7 +10,6 @@ from flask import (
     current_app,
     jsonify,
     request,
-    session,
     stream_with_context,
 )
 from openai import OpenAIError
@@ -24,7 +23,7 @@ from llm.llm import (
     open_skill_roadmap_stream,
 )
 from models.skills import Skill, Page, Note
-from models.users import User
+from middleware.isuserauthenticated import get_authenticated_user
 
 skill_bp = Blueprint("skills", __name__, url_prefix="/api/skills")
 
@@ -167,15 +166,7 @@ DEFAULT_SKILLS = [
 
 def _get_current_user():
     """Retrieves and validates the currently authenticated User."""
-    user_id = session.get("user_id")
-    if not user_id:
-        return None
-    user = db.session.get(User, user_id)
-    if not user:
-        session.clear()
-        return None
-    return user
-
+    return get_authenticated_user()
 
 def _sync_skill_pages_and_notes(skill_id, user_id, raw_subtopics):
     """

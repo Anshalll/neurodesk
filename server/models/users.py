@@ -59,7 +59,9 @@ class AuthCredential(db.Model):
     reset_expires_at = db.Column(db.BigInteger)
     reset_requested_at = db.Column(db.BigInteger)
     reset_attempts = db.Column(db.Integer, default=0, nullable=False)
-    session_version = db.Column(db.String(64), nullable=False, default="")
+    token_version = db.Column(
+        "session_version", db.String(64), nullable=False, default=""
+    )
     user = db.relationship("User", back_populates="auth_credential")
 
     def __init__(self, **kwargs):

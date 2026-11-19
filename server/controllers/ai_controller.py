@@ -1,25 +1,20 @@
-from flask import Blueprint, current_app, jsonify, request, session
+from flask import Blueprint, current_app, jsonify, request
 from openai import OpenAIError
 
-from db.db import db
 from llm.llm import (
     AIConfigurationError,
     AIResponseError,
     generate_note_assistance,
     generate_note_quiz,
 )
-from models.users import User
+from middleware.isuserauthenticated import login_required
 
 ai_bp = Blueprint("ai", __name__, url_prefix="/api/ai")
 
 
 @ai_bp.route("/note-assistant", methods=["POST"])
+@login_required
 def note_assistant():
-    user_id = session.get("user_id")
-    if not user_id or not db.session.get(User, user_id):
-        session.clear()
-        return jsonify({"error": "Authentication required"}), 401
-
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "A JSON request body is required."}), 400
@@ -81,12 +76,8 @@ def note_assistant():
 
 
 @ai_bp.route("/generate-quiz", methods=["POST"])
+@login_required
 def generate_quiz():
-    user_id = session.get("user_id")
-    if not user_id or not db.session.get(User, user_id):
-        session.clear()
-        return jsonify({"error": "Authentication required"}), 401
-
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "A JSON request body is required."}), 400

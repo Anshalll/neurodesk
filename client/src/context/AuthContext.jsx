@@ -11,10 +11,10 @@ export function AuthProvider({ children }) {
 
   const clearError = useCallback(() => setError(null), []);
 
-  // Check existing session from backend on mount
+  // Restore the user from the HttpOnly JWT cookie on mount
   useEffect(() => {
     let isMounted = true;
-    async function checkSession() {
+    async function checkAuthentication() {
       try {
         const res = await apiFetch('/api/auth/me', {
           method: 'GET',
@@ -30,12 +30,12 @@ export function AuthProvider({ children }) {
           }
         }
       } catch (err) {
-        console.error('Could not verify the backend session:', err);
+        console.error('Could not verify the backend authentication:', err);
       } finally {
         if (isMounted) setInitialChecking(false);
       }
     }
-    checkSession();
+    checkAuthentication();
     return () => {
       isMounted = false;
     };
